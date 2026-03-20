@@ -1,8 +1,12 @@
+"engines": {
+  "node": "18.x"
+}
 {
   "name": "h2-webhook-bridge",
   "version": "1.0.0",
   "description": "TradingView webhook bridge for H2 trading system",
-  "main": "server.js",
+  "main": "server.js",  
+
   "scripts": {
     "start": "node server.js"
   },
