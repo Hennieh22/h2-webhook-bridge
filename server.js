@@ -1,6 +1,6 @@
 const express = require("express");
 const dotenv = require("dotenv");
-const { placeMarketOrder } = require("./brokers/ig");
+const { placeMarketOrder, searchMarkets, getMarketDetails } = require("./brokers/ig");
 
 dotenv.config();
 
@@ -90,6 +90,35 @@ app.post("/webhook/tradingview", (req, res) => {
   }
 
   res.json({ ok: true });
+});
+app.get("/ig/search", async (req, res) => {
+  try {
+    const term = String(req.query.term || "").trim();
+    if (!term) {
+      return res.status(400).json({ ok: false, error: "Missing ?term=" });
+    }
+
+    const data = await searchMarkets(term);
+    res.json({ ok: true, term, data });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message || "IG search failed"
+    });
+  }
+});
+
+app.get("/ig/market/:epic", async (req, res) => {
+  try {
+    const epic = req.params.epic;
+    const data = await getMarketDetails(epic);
+    res.json({ ok: true, epic, data });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message || "IG market lookup failed"
+    });
+  }
 });
 
 // -----------------------------------------------------------------------------

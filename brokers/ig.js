@@ -6,11 +6,6 @@ const IG_ACCOUNT_MODE = process.env.IG_ACCOUNT_MODE || "DEMO";
 const IG_DEFAULT_SIZE = Number(process.env.IG_DEFAULT_SIZE || "1");
 const IG_CURRENCY_CODE = process.env.IG_CURRENCY_CODE || "USD";
 
-// You should set these in Railway Variables.
-// Example:
-// IG_EPIC_JP225=YOUR_IG_EPIC_FOR_JP225
-// IG_EPIC_NAS100=YOUR_IG_EPIC_FOR_NAS100
-// IG_EPIC_DAX40=YOUR_IG_EPIC_FOR_DAX40
 function resolveEpic(symbol) {
   const s = String(symbol || "").toUpperCase();
 
@@ -107,19 +102,15 @@ function sideToDirection(type) {
 }
 
 async function placeMarketOrder(signal) {
-  const epic = resolveEpic(signal.symbol);
+  const epic = signal.epic || resolveEpic(signal.symbol);
   if (!epic) {
-    throw new Error(`No IG epic configured for symbol: ${signal.symbol}`);
+    throw new Error(`No IG epic configured for symbol: ${signal.symbol || "UNKNOWN"}`);
   }
 
-  const direction = sideToDirection(signal.type);
+  const direction = signal.direction || sideToDirection(signal.type);
   const session = await createSession();
 
-  // First safe version:
-  // - market entry
-  // - stopLevel sent to broker
-  // - TP1/TP2/TP3 kept in bridge for later management
-  const size = Number(signal.brokerSize || IG_DEFAULT_SIZE);
+  const size = Number(signal.brokerSize || signal.size || IG_DEFAULT_SIZE);
   const stopLevel = Number(signal.sl);
 
   if (!Number.isFinite(size) || size <= 0) {
@@ -165,7 +156,6 @@ async function placeMarketOrder(signal) {
 
 async function closePositionByDealId(dealId, direction, size) {
   const session = await createSession();
-
   const closeDirection = String(direction).toUpperCase() === "BUY" ? "SELL" : "BUY";
 
   const result = await igFetch(
@@ -194,9 +184,37 @@ async function closePositionByDealId(dealId, direction, size) {
   };
 }
 
+async function searchMarkets(term) {
+  const session = await createSession();
+
+  const result = await igFetch(
+    `/markets?searchTerm=${encodeURIComponent(term)}`,
+    { method: "GET" },
+    session,
+    "1"
+  );
+
+  return result.data;
+}
+
+async function getMarketDetails(epic) {
+  const session = await createSession();
+
+  const result = await igFetch(
+    `/markets/${encodeURIComponent(epic)}`,
+    { method: "GET" },
+    session,
+    "3"
+  );
+
+  return result.data;
+}
+
 module.exports = {
   createSession,
   placeMarketOrder,
   closePositionByDealId,
-  resolveEpic
+  resolveEpic,
+  searchMarkets,
+  getMarketDetails
 };
