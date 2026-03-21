@@ -1,7 +1,5 @@
 const express = require("express");
 const dotenv = require("dotenv");
-const sqlite3 = require("sqlite3").verbose();
-const path = require("path");
 
 dotenv.config();
 
@@ -13,38 +11,19 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "changeme";
 const APP_NAME = process.env.APP_NAME || "H2 Webhook Bridge";
 
-const dbPath = path.join(__dirname, "bridge.db");
-const db = new sqlite3.Database(dbPath);
-
 // -----------------------------------------------------------------------------
-// DB HELPERS
+// IN-MEMORY STORAGE
 // -----------------------------------------------------------------------------
-function dbRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve(this);
-    });
-  });
-}
+const settings = {
+  usdPerPip: 0.1,
+  beAfterTp1: 1,
+  autoCloseAtTp3: 1,
+  tp1PartialPct: 0,
+  tp2PartialPct: 0
+};
 
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
-    });
-  });
-}
-
-function dbAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-}
+let alerts = [];
+let trades = [];
 
 // -----------------------------------------------------------------------------
 // UTILITIES
@@ -84,35 +63,29 @@ function calcMoney(distance, usdPerPip) {
   return Number(distance) * Number(usdPerPip);
 }
 
-async function getSetting(key, fallback) {
-  const row = await dbGet(`SELECT value FROM settings WHERE key = ?`, [key]);
-  return row ? row.value : fallback;
+function getSetting(key, fallback) {
+  return settings[key] !== undefined ? settings[key] : fallback;
 }
 
-async function setSetting(key, value) {
-  await dbRun(
-    `INSERT INTO settings (key, value)
-     VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    [key, String(value)]
-  );
+function setSetting(key, value) {
+  settings[key] = value;
 }
 
-async function getUsdPerPip() {
-  return Number(await getSetting("usdPerPip", "0.1"));
+function getUsdPerPip() {
+  return Number(getSetting("usdPerPip", 0.1));
 }
 
-async function setUsdPerPip(value) {
-  await setSetting("usdPerPip", value);
+function setUsdPerPip(value) {
+  setSetting("usdPerPip", Number(value));
 }
 
-async function getManagerSettings() {
+function getManagerSettings() {
   return {
-    usdPerPip: Number(await getSetting("usdPerPip", "0.1")),
-    beAfterTp1: Number(await getSetting("beAfterTp1", "1")),
-    autoCloseAtTp3: Number(await getSetting("autoCloseAtTp3", "1")),
-    tp1PartialPct: Number(await getSetting("tp1PartialPct", "0")),
-    tp2PartialPct: Number(await getSetting("tp2PartialPct", "0"))
+    usdPerPip: Number(getSetting("usdPerPip", 0.1)),
+    beAfterTp1: Number(getSetting("beAfterTp1", 1)),
+    autoCloseAtTp3: Number(getSetting("autoCloseAtTp3", 1)),
+    tp1PartialPct: Number(getSetting("tp1PartialPct", 0)),
+    tp2PartialPct: Number(getSetting("tp2PartialPct", 0))
   };
 }
 
@@ -134,52 +107,37 @@ function statusPill(status) {
   return `<span class="pill pill-gray">${s || "UNKNOWN"}</span>`;
 }
 
-async function recalcTradeById(tradeId) {
-  const t = await dbGet(`SELECT * FROM trades WHERE id = ?`, [tradeId]);
+function recalcTradeById(tradeId) {
+  const t = trades.find((x) => x.id === tradeId);
   if (!t) return;
 
-  const usdPerPip = await getUsdPerPip();
+  const usdPerPip = getUsdPerPip();
 
-  const riskPips = calcPipDistance(t.entry, t.currentSl);
-  const tp1Pips = calcPipDistance(t.entry, t.tp1);
-  const tp2Pips = calcPipDistance(t.entry, t.tp2);
-  const tp3Pips = calcPipDistance(t.entry, t.tp3);
-
-  await dbRun(
-    `UPDATE trades
-     SET usdPerPip = ?, riskPips = ?, tp1Pips = ?, tp2Pips = ?, tp3Pips = ?,
-         riskUsd = ?, tp1Usd = ?, tp2Usd = ?, tp3Usd = ?
-     WHERE id = ?`,
-    [
-      usdPerPip,
-      riskPips,
-      tp1Pips,
-      tp2Pips,
-      tp3Pips,
-      calcMoney(riskPips, usdPerPip),
-      calcMoney(tp1Pips, usdPerPip),
-      calcMoney(tp2Pips, usdPerPip),
-      calcMoney(tp3Pips, usdPerPip),
-      tradeId
-    ]
-  );
+  t.usdPerPip = usdPerPip;
+  t.riskPips = calcPipDistance(t.entry, t.currentSl);
+  t.tp1Pips = calcPipDistance(t.entry, t.tp1);
+  t.tp2Pips = calcPipDistance(t.entry, t.tp2);
+  t.tp3Pips = calcPipDistance(t.entry, t.tp3);
+  t.riskUsd = calcMoney(t.riskPips, usdPerPip);
+  t.tp1Usd = calcMoney(t.tp1Pips, usdPerPip);
+  t.tp2Usd = calcMoney(t.tp2Pips, usdPerPip);
+  t.tp3Usd = calcMoney(t.tp3Pips, usdPerPip);
 }
 
-async function recalcAllTrades() {
-  const trades = await dbAll(`SELECT id FROM trades ORDER BY createdAt DESC`);
+function recalcAllTrades() {
   for (const t of trades) {
-    await recalcTradeById(t.id);
+    recalcTradeById(t.id);
   }
 }
 
-async function applyTradeCheck(tradeId, currentPriceInput) {
-  const trade = await dbGet(`SELECT * FROM trades WHERE id = ?`, [tradeId]);
+function applyTradeCheck(tradeId, currentPriceInput) {
+  const trade = trades.find((x) => x.id === tradeId);
   if (!trade) return;
 
   const currentPrice = sanitizeNumber(currentPriceInput);
   if (currentPrice === null) return;
 
-  const manager = await getManagerSettings();
+  const manager = getManagerSettings();
 
   let status = trade.status || "OPEN";
   let lastAction = `Checked price ${currentPrice}`;
@@ -293,15 +251,16 @@ async function applyTradeCheck(tradeId, currentPriceInput) {
     }
   }
 
-  await dbRun(
-    `UPDATE trades
-     SET currentPrice = ?, currentSl = ?, tp1Hit = ?, tp2Hit = ?, tp3Hit = ?,
-         breakEvenMoved = ?, status = ?, lastAction = ?
-     WHERE id = ?`,
-    [currentPrice, currentSl, tp1Hit, tp2Hit, tp3Hit, breakEvenMoved, status, lastAction, tradeId]
-  );
+  trade.currentPrice = currentPrice;
+  trade.currentSl = currentSl;
+  trade.tp1Hit = tp1Hit;
+  trade.tp2Hit = tp2Hit;
+  trade.tp3Hit = tp3Hit;
+  trade.breakEvenMoved = breakEvenMoved;
+  trade.status = status;
+  trade.lastAction = lastAction;
 
-  await recalcTradeById(tradeId);
+  recalcTradeById(tradeId);
 }
 
 function renderPage(title, content) {
@@ -519,137 +478,25 @@ function renderPage(title, content) {
 }
 
 // -----------------------------------------------------------------------------
-// DB INIT / MIGRATION
-// -----------------------------------------------------------------------------
-async function initDb() {
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `);
-
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS alerts (
-      id TEXT PRIMARY KEY,
-      receivedAt TEXT,
-      bridge TEXT,
-      mode TEXT,
-      type TEXT,
-      symbol TEXT,
-      tf TEXT,
-      entry REAL,
-      sl REAL,
-      tp1 REAL,
-      tp2 REAL,
-      tp3 REAL,
-      confidence REAL,
-      wa_route TEXT,
-      broker_route TEXT,
-      raw_json TEXT
-    )
-  `);
-
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS trades (
-      id TEXT PRIMARY KEY,
-      createdAt TEXT,
-      bridge TEXT,
-      mode TEXT,
-      type TEXT,
-      symbol TEXT,
-      tf TEXT,
-      entry REAL,
-      sl REAL,
-      tp1 REAL,
-      tp2 REAL,
-      tp3 REAL,
-      confidence REAL,
-      wa_route TEXT,
-      broker_route TEXT,
-      status TEXT,
-      usdPerPip REAL,
-      riskPips REAL,
-      tp1Pips REAL,
-      tp2Pips REAL,
-      tp3Pips REAL,
-      riskUsd REAL,
-      tp1Usd REAL,
-      tp2Usd REAL,
-      tp3Usd REAL,
-      originalSl REAL,
-      currentSl REAL,
-      tp1Hit INTEGER DEFAULT 0,
-      tp2Hit INTEGER DEFAULT 0,
-      tp3Hit INTEGER DEFAULT 0,
-      breakEvenMoved INTEGER DEFAULT 0,
-      lastAction TEXT,
-      currentPrice REAL
-    )
-  `);
-
-  const defaults = [
-    ["usdPerPip", "0.1"],
-    ["beAfterTp1", "1"],
-    ["autoCloseAtTp3", "1"],
-    ["tp1PartialPct", "0"],
-    ["tp2PartialPct", "0"]
-  ];
-
-  for (const [key, value] of defaults) {
-    const row = await dbGet(`SELECT value FROM settings WHERE key = ?`, [key]);
-    if (!row) await setSetting(key, value);
-  }
-
-  const columnChecks = [
-    { name: "originalSl", sql: `ALTER TABLE trades ADD COLUMN originalSl REAL` },
-    { name: "currentSl", sql: `ALTER TABLE trades ADD COLUMN currentSl REAL` },
-    { name: "tp1Hit", sql: `ALTER TABLE trades ADD COLUMN tp1Hit INTEGER DEFAULT 0` },
-    { name: "tp2Hit", sql: `ALTER TABLE trades ADD COLUMN tp2Hit INTEGER DEFAULT 0` },
-    { name: "tp3Hit", sql: `ALTER TABLE trades ADD COLUMN tp3Hit INTEGER DEFAULT 0` },
-    { name: "breakEvenMoved", sql: `ALTER TABLE trades ADD COLUMN breakEvenMoved INTEGER DEFAULT 0` },
-    { name: "lastAction", sql: `ALTER TABLE trades ADD COLUMN lastAction TEXT` },
-    { name: "currentPrice", sql: `ALTER TABLE trades ADD COLUMN currentPrice REAL` }
-  ];
-
-  const cols = await dbAll(`PRAGMA table_info(trades)`);
-  const existing = cols.map(c => c.name);
-
-  for (const c of columnChecks) {
-    if (!existing.includes(c.name)) {
-      await dbRun(c.sql);
-    }
-  }
-
-  await dbRun(`UPDATE trades SET originalSl = sl WHERE originalSl IS NULL`);
-  await dbRun(`UPDATE trades SET currentSl = sl WHERE currentSl IS NULL`);
-  await dbRun(`UPDATE trades SET lastAction = 'Trade created' WHERE lastAction IS NULL`);
-}
-
-// -----------------------------------------------------------------------------
 // ROUTES
 // -----------------------------------------------------------------------------
-app.get("/health", async (req, res) => {
-  const alertsCount = await dbGet(`SELECT COUNT(*) as count FROM alerts`);
-  const tradesCount = await dbGet(`SELECT COUNT(*) as count FROM trades`);
-  const manager = await getManagerSettings();
+app.get("/health", (req, res) => {
+  const manager = getManagerSettings();
 
   res.json({
     ok: true,
     app: APP_NAME,
     time: nowIso(),
-    alertsStored: alertsCount.count,
-    tradesStored: tradesCount.count,
+    alertsStored: alerts.length,
+    tradesStored: trades.length,
     ...manager
   });
 });
 
-app.get("/", async (req, res) => {
-  const latestAlerts = await dbAll(`SELECT * FROM alerts ORDER BY receivedAt DESC LIMIT 10`);
-  const latestTrades = await dbAll(`SELECT * FROM trades ORDER BY createdAt DESC LIMIT 12`);
-  const alertsCount = await dbGet(`SELECT COUNT(*) as count FROM alerts`);
-  const tradesCount = await dbGet(`SELECT COUNT(*) as count FROM trades`);
-  const manager = await getManagerSettings();
+app.get("/", (req, res) => {
+  const latestAlerts = alerts.slice().sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)).slice(0, 10);
+  const latestTrades = trades.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 12);
+  const manager = getManagerSettings();
 
   const alertsRows = latestAlerts.map((a) => `
     <tr>
@@ -757,11 +604,11 @@ app.get("/", async (req, res) => {
       </div>
       <div class="card">
         <div class="label">Alerts Stored</div>
-        <div class="big">${alertsCount.count}</div>
+        <div class="big">${alerts.length}</div>
       </div>
       <div class="card">
         <div class="label">Trades Stored</div>
-        <div class="big">${tradesCount.count}</div>
+        <div class="big">${trades.length}</div>
       </div>
       <div class="card">
         <div class="label">USD per Pip</div>
@@ -840,69 +687,68 @@ app.get("/", async (req, res) => {
   res.send(html);
 });
 
-app.post("/settings/usd-per-pip", async (req, res) => {
+app.post("/settings/usd-per-pip", (req, res) => {
   const value = sanitizeNumber(req.body.usdPerPip);
   if (value === null || value <= 0) {
     return res.status(400).send("Invalid usdPerPip value");
   }
 
-  await setUsdPerPip(value);
-  await recalcAllTrades();
+  setUsdPerPip(value);
+  recalcAllTrades();
   res.redirect("/");
 });
 
-app.post("/settings/manager-rules", async (req, res) => {
+app.post("/settings/manager-rules", (req, res) => {
   const beAfterTp1 = sanitizeBoolFromForm(req.body.beAfterTp1, 0);
   const autoCloseAtTp3 = sanitizeBoolFromForm(req.body.autoCloseAtTp3, 0);
   const tp1PartialPct = Math.max(0, Math.min(100, sanitizeNumber(req.body.tp1PartialPct, 0)));
   const tp2PartialPct = Math.max(0, Math.min(100, sanitizeNumber(req.body.tp2PartialPct, 0)));
 
-  await setSetting("beAfterTp1", beAfterTp1);
-  await setSetting("autoCloseAtTp3", autoCloseAtTp3);
-  await setSetting("tp1PartialPct", tp1PartialPct);
-  await setSetting("tp2PartialPct", tp2PartialPct);
+  setSetting("beAfterTp1", beAfterTp1);
+  setSetting("autoCloseAtTp3", autoCloseAtTp3);
+  setSetting("tp1PartialPct", tp1PartialPct);
+  setSetting("tp2PartialPct", tp2PartialPct);
 
   res.redirect("/");
 });
 
-app.get("/alerts", async (req, res) => {
-  const rows = await dbAll(`SELECT * FROM alerts ORDER BY receivedAt DESC`);
-  const safeAlerts = rows.map((a) => {
-    const raw = a.raw_json ? JSON.parse(a.raw_json) : null;
-    return {
+app.get("/alerts", (req, res) => {
+  const safeAlerts = alerts
+    .slice()
+    .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+    .map((a) => ({
       ...a,
-      raw: raw
+      raw: a.raw_json
         ? {
-            ...raw,
-            secret: raw.secret ? "***MASKED***" : undefined
+            ...JSON.parse(a.raw_json),
+            secret: "***MASKED***"
           }
         : undefined,
       raw_json: undefined
-    };
-  });
+    }));
 
   res.json(safeAlerts);
 });
 
-app.get("/trades", async (req, res) => {
-  const rows = await dbAll(`SELECT * FROM trades ORDER BY createdAt DESC`);
+app.get("/trades", (req, res) => {
+  const rows = trades.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   res.json(rows);
 });
 
 // -----------------------------------------------------------------------------
 // MANUAL TRADE ACTIONS
 // -----------------------------------------------------------------------------
-app.post("/trade/:id/check-price", async (req, res) => {
-  await applyTradeCheck(req.params.id, req.body.currentPrice);
+app.post("/trade/:id/check-price", (req, res) => {
+  applyTradeCheck(req.params.id, req.body.currentPrice);
   res.redirect("/");
 });
 
-app.post("/trade/:id/tp1-hit", async (req, res) => {
+app.post("/trade/:id/tp1-hit", (req, res) => {
   const id = req.params.id;
-  const trade = await dbGet(`SELECT * FROM trades WHERE id = ?`, [id]);
+  const trade = trades.find((x) => x.id === id);
   if (!trade) return res.status(404).send("Trade not found");
 
-  const manager = await getManagerSettings();
+  const manager = getManagerSettings();
 
   let currentSl = trade.currentSl;
   let breakEvenMoved = trade.breakEvenMoved;
@@ -924,87 +770,91 @@ app.post("/trade/:id/tp1-hit", async (req, res) => {
     }
   }
 
-  await dbRun(
-    `UPDATE trades
-     SET tp1Hit = 1, currentSl = ?, breakEvenMoved = ?, status = ?, lastAction = ?
-     WHERE id = ?`,
-    [currentSl, breakEvenMoved, status, lastAction, id]
-  );
+  trade.tp1Hit = 1;
+  trade.currentSl = currentSl;
+  trade.breakEvenMoved = breakEvenMoved;
+  trade.status = status;
+  trade.lastAction = lastAction;
 
-  await recalcTradeById(id);
+  recalcTradeById(id);
   res.redirect("/");
 });
 
-app.post("/trade/:id/tp2-hit", async (req, res) => {
+app.post("/trade/:id/tp2-hit", (req, res) => {
   const id = req.params.id;
-  const manager = await getManagerSettings();
+  const trade = trades.find((x) => x.id === id);
+  if (!trade) return res.status(404).send("Trade not found");
+
+  const manager = getManagerSettings();
 
   let lastAction = "TP2 marked hit";
   if (manager.tp2PartialPct > 0) {
     lastAction += ` | Partial close ${manager.tp2PartialPct}% placeholder`;
   }
 
-  await dbRun(
-    `UPDATE trades SET tp2Hit = 1, status = ?, lastAction = ? WHERE id = ?`,
-    ["TP2 HIT", lastAction, id]
-  );
-  await recalcTradeById(id);
+  trade.tp2Hit = 1;
+  trade.status = "TP2 HIT";
+  trade.lastAction = lastAction;
+
+  recalcTradeById(id);
   res.redirect("/");
 });
 
-app.post("/trade/:id/tp3-hit", async (req, res) => {
+app.post("/trade/:id/tp3-hit", (req, res) => {
   const id = req.params.id;
-  const manager = await getManagerSettings();
-
-  const status = manager.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT";
-  const lastAction = manager.autoCloseAtTp3 ? "TP3 marked hit and trade closed" : "TP3 marked hit";
-
-  await dbRun(
-    `UPDATE trades SET tp3Hit = 1, status = ?, lastAction = ? WHERE id = ?`,
-    [status, lastAction, id]
-  );
-  await recalcTradeById(id);
-  res.redirect("/");
-});
-
-app.post("/trade/:id/move-sl-be", async (req, res) => {
-  const id = req.params.id;
-  const trade = await dbGet(`SELECT * FROM trades WHERE id = ?`, [id]);
+  const trade = trades.find((x) => x.id === id);
   if (!trade) return res.status(404).send("Trade not found");
 
-  await dbRun(
-    `UPDATE trades
-     SET currentSl = ?, breakEvenMoved = 1, status = ?, lastAction = ?
-     WHERE id = ?`,
-    [trade.entry, "BREAKEVEN MOVED", "SL manually moved to entry", id]
-  );
+  const manager = getManagerSettings();
 
-  await recalcTradeById(id);
+  trade.tp3Hit = 1;
+  trade.status = manager.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT";
+  trade.lastAction = manager.autoCloseAtTp3 ? "TP3 marked hit and trade closed" : "TP3 marked hit";
+
+  recalcTradeById(id);
   res.redirect("/");
 });
 
-app.post("/trade/:id/close", async (req, res) => {
-  await dbRun(
-    `UPDATE trades SET status = ?, lastAction = ? WHERE id = ?`,
-    ["CLOSED", "Trade manually closed", req.params.id]
-  );
-  await recalcTradeById(req.params.id);
+app.post("/trade/:id/move-sl-be", (req, res) => {
+  const id = req.params.id;
+  const trade = trades.find((x) => x.id === id);
+  if (!trade) return res.status(404).send("Trade not found");
+
+  trade.currentSl = trade.entry;
+  trade.breakEvenMoved = 1;
+  trade.status = "BREAKEVEN MOVED";
+  trade.lastAction = "SL manually moved to entry";
+
+  recalcTradeById(id);
   res.redirect("/");
 });
 
-app.post("/trade/:id/stop", async (req, res) => {
-  await dbRun(
-    `UPDATE trades SET status = ?, lastAction = ? WHERE id = ?`,
-    ["STOPPED OUT", "Trade manually stopped out", req.params.id]
-  );
-  await recalcTradeById(req.params.id);
+app.post("/trade/:id/close", (req, res) => {
+  const trade = trades.find((x) => x.id === req.params.id);
+  if (!trade) return res.status(404).send("Trade not found");
+
+  trade.status = "CLOSED";
+  trade.lastAction = "Trade manually closed";
+
+  recalcTradeById(req.params.id);
+  res.redirect("/");
+});
+
+app.post("/trade/:id/stop", (req, res) => {
+  const trade = trades.find((x) => x.id === req.params.id);
+  if (!trade) return res.status(404).send("Trade not found");
+
+  trade.status = "STOPPED OUT";
+  trade.lastAction = "Trade manually stopped out";
+
+  recalcTradeById(req.params.id);
   res.redirect("/");
 });
 
 // -----------------------------------------------------------------------------
 // WEBHOOK
 // -----------------------------------------------------------------------------
-app.post("/webhook/tradingview", async (req, res) => {
+app.post("/webhook/tradingview", (req, res) => {
   try {
     const payload = req.body || {};
     const providedSecret = sanitizeString(payload.secret);
@@ -1035,43 +885,15 @@ app.post("/webhook/tradingview", async (req, res) => {
       raw_json: JSON.stringify(payload)
     };
 
-    await dbRun(
-      `INSERT INTO alerts (
-        id, receivedAt, bridge, mode, type, symbol, tf, entry, sl, tp1, tp2, tp3,
-        confidence, wa_route, broker_route, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        alertRecord.id,
-        alertRecord.receivedAt,
-        alertRecord.bridge,
-        alertRecord.mode,
-        alertRecord.type,
-        alertRecord.symbol,
-        alertRecord.tf,
-        alertRecord.entry,
-        alertRecord.sl,
-        alertRecord.tp1,
-        alertRecord.tp2,
-        alertRecord.tp3,
-        alertRecord.confidence,
-        alertRecord.wa_route,
-        alertRecord.broker_route,
-        alertRecord.raw_json
-      ]
-    );
+    alerts.push(alertRecord);
 
     if (alertRecord.type === "LONG" || alertRecord.type === "SHORT") {
-      const usdPerPip = await getUsdPerPip();
+      const usdPerPip = getUsdPerPip();
       const entry = alertRecord.entry;
       const sl = alertRecord.sl;
       const tp1 = alertRecord.tp1;
       const tp2 = alertRecord.tp2;
       const tp3 = alertRecord.tp3;
-
-      const riskPips = calcPipDistance(entry, sl);
-      const tp1Pips = calcPipDistance(entry, tp1);
-      const tp2Pips = calcPipDistance(entry, tp2);
-      const tp3Pips = calcPipDistance(entry, tp3);
 
       const tradeRecord = {
         id: `trade_${Date.now()}`,
@@ -1091,14 +913,14 @@ app.post("/webhook/tradingview", async (req, res) => {
         broker_route: alertRecord.broker_route,
         status: "OPEN",
         usdPerPip,
-        riskPips,
-        tp1Pips,
-        tp2Pips,
-        tp3Pips,
-        riskUsd: calcMoney(riskPips, usdPerPip),
-        tp1Usd: calcMoney(tp1Pips, usdPerPip),
-        tp2Usd: calcMoney(tp2Pips, usdPerPip),
-        tp3Usd: calcMoney(tp3Pips, usdPerPip),
+        riskPips: calcPipDistance(entry, sl),
+        tp1Pips: calcPipDistance(entry, tp1),
+        tp2Pips: calcPipDistance(entry, tp2),
+        tp3Pips: calcPipDistance(entry, tp3),
+        riskUsd: calcMoney(calcPipDistance(entry, sl), usdPerPip),
+        tp1Usd: calcMoney(calcPipDistance(entry, tp1), usdPerPip),
+        tp2Usd: calcMoney(calcPipDistance(entry, tp2), usdPerPip),
+        tp3Usd: calcMoney(calcPipDistance(entry, tp3), usdPerPip),
         originalSl: sl,
         currentSl: sl,
         tp1Hit: 0,
@@ -1109,49 +931,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         currentPrice: null
       };
 
-      await dbRun(
-        `INSERT INTO trades (
-          id, createdAt, bridge, mode, type, symbol, tf, entry, sl, tp1, tp2, tp3,
-          confidence, wa_route, broker_route, status, usdPerPip,
-          riskPips, tp1Pips, tp2Pips, tp3Pips, riskUsd, tp1Usd, tp2Usd, tp3Usd,
-          originalSl, currentSl, tp1Hit, tp2Hit, tp3Hit, breakEvenMoved, lastAction, currentPrice
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          tradeRecord.id,
-          tradeRecord.createdAt,
-          tradeRecord.bridge,
-          tradeRecord.mode,
-          tradeRecord.type,
-          tradeRecord.symbol,
-          tradeRecord.tf,
-          tradeRecord.entry,
-          tradeRecord.sl,
-          tradeRecord.tp1,
-          tradeRecord.tp2,
-          tradeRecord.tp3,
-          tradeRecord.confidence,
-          tradeRecord.wa_route,
-          tradeRecord.broker_route,
-          tradeRecord.status,
-          tradeRecord.usdPerPip,
-          tradeRecord.riskPips,
-          tradeRecord.tp1Pips,
-          tradeRecord.tp2Pips,
-          tradeRecord.tp3Pips,
-          tradeRecord.riskUsd,
-          tradeRecord.tp1Usd,
-          tradeRecord.tp2Usd,
-          tradeRecord.tp3Usd,
-          tradeRecord.originalSl,
-          tradeRecord.currentSl,
-          tradeRecord.tp1Hit,
-          tradeRecord.tp2Hit,
-          tradeRecord.tp3Hit,
-          tradeRecord.breakEvenMoved,
-          tradeRecord.lastAction,
-          tradeRecord.currentPrice
-        ]
-      );
+      trades.push(tradeRecord);
     }
 
     console.log("Webhook received:", JSON.stringify(alertRecord, null, 2));
@@ -1173,17 +953,6 @@ app.post("/webhook/tradingview", async (req, res) => {
 // -----------------------------------------------------------------------------
 // STARTUP
 // -----------------------------------------------------------------------------
-(async () => {
-  try {
-    await initDb();
-    await recalcAllTrades();
-
-    app.listen(PORT, () => {
-      console.log(`${APP_NAME} listening on port ${PORT}`);
-      console.log(`SQLite DB: ${dbPath}`);
-    });
-  } catch (error) {
-    console.error("Startup error:", error);
-    process.exit(1);
-  }
-})();
+app.listen(PORT, () => {
+  console.log(`${APP_NAME} listening on port ${PORT}`);
+});
