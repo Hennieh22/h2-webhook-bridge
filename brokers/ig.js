@@ -118,6 +118,7 @@ async function placeMarketOrder(signal) {
 
   const body = {
     epic,
+    expiry: "-",
     direction,
     size,
     orderType: "MARKET",
