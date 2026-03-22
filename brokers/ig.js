@@ -111,14 +111,9 @@ async function placeMarketOrder(signal) {
   const session = await createSession();
 
   const size = Number(signal.brokerSize || signal.size || IG_DEFAULT_SIZE);
-  const stopLevel = Number(signal.sl);
 
   if (!Number.isFinite(size) || size <= 0) {
     throw new Error("Invalid IG order size");
-  }
-
-  if (!Number.isFinite(stopLevel)) {
-    throw new Error("Invalid stopLevel");
   }
 
   const body = {
@@ -128,8 +123,7 @@ async function placeMarketOrder(signal) {
     orderType: "MARKET",
     forceOpen: true,
     guaranteedStop: false,
-    currencyCode: IG_CURRENCY_CODE,
-    stopLevel
+    currencyCode: IG_CURRENCY_CODE
   };
 
   const result = await igFetch(
@@ -149,7 +143,6 @@ async function placeMarketOrder(signal) {
     epic,
     direction,
     size,
-    stopLevel,
     response: result.data
   };
 }
