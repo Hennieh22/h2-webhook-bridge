@@ -2,6 +2,7 @@ const express = require("express");
 const dotenv  = require("dotenv");
 const { Pool } = require("pg");
 const {
+  setConfig,
   placeMarketOrder,
   getOpenPositions,
   getCurrentPrice,
@@ -206,6 +207,27 @@ let settingsCache = {
 async function loadSettingsCache() {
   const stored = await dbGetAllSettings();
   settingsCache = { ...settingsCache, ...stored };
+}
+
+// Load broker credentials and instrument epics from DB into ig.js
+async function loadBrokerConfig() {
+  const s = settingsCache;
+  const epics = {};
+  for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
+    const val = await dbGetSetting(`epic_${key}`, "");
+    if (val) epics[key] = val;
+  }
+  setConfig({
+    baseUrl:      s.ig_base_url     || process.env.IG_BASE_URL     || "https://demo-api.ig.com/gateway/deal",
+    apiKey:       s.ig_api_key      || process.env.IG_API_KEY      || "",
+    identifier:   s.ig_identifier   || process.env.IG_IDENTIFIER   || "",
+    password:     s.ig_password     || process.env.IG_PASSWORD     || "",
+    accountMode:  s.ig_account_mode || process.env.IG_ACCOUNT_MODE || "DEMO",
+    defaultSize:  Number(s.ig_default_size || process.env.IG_DEFAULT_SIZE || 1),
+    currencyCode: s.ig_currency     || process.env.IG_CURRENCY_CODE || "USD",
+    epics
+  });
+  console.log("[Config] Broker config loaded from DB/env");
 }
 
 async function saveSetting(key, value) {
@@ -674,6 +696,7 @@ app.get("/", async (req, res) => {
         </div>
         <div class="nav">
           <a href="/">Dashboard</a>
+          <a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a>
           <a href="/alerts">Alerts JSON</a>
           <a href="/trades">Trades JSON</a>
           <a href="/executions">Executions JSON</a>
@@ -1035,6 +1058,299 @@ app.get("/health", async (req, res) => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// SETTINGS PAGE — Phase C4.4
+// ---------------------------------------------------------------------------
+app.get("/settings", async (req, res) => {
+  try {
+    const s   = settingsCache;
+    const msg = req.query.msg || "";
+    const err = req.query.err || "";
+
+    // Load current instrument epics from DB
+    const epics = {};
+    const epicSizes = {};
+    for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
+      epics[key]     = await dbGetSetting(`epic_${key}`, "");
+      epicSizes[key] = await dbGetSetting(`size_${key}`, 1);
+    }
+
+    const accountMode  = s.ig_account_mode || process.env.IG_ACCOUNT_MODE || "DEMO";
+    const execMode     = process.env.EXECUTION_MODE || "APPROVAL";
+    const igApiKey     = s.ig_api_key     ? "••••••••" + String(s.ig_api_key).slice(-6)     : (process.env.IG_API_KEY     ? "••••••••" + process.env.IG_API_KEY.slice(-6)     : "");
+    const igIdentifier = s.ig_identifier  || process.env.IG_IDENTIFIER  || "";
+    const igBaseUrl    = s.ig_base_url    || process.env.IG_BASE_URL    || "https://demo-api.ig.com/gateway/deal";
+
+    const isLive = accountMode === "LIVE";
+    const isAuto = execMode === "AUTO";
+
+    const html = renderPage(APP_NAME + " · Settings", `
+      <div class="topbar">
+        <div>
+          <h1>⚙ Settings</h1>
+          <div class="muted">Phase C4.4 — Configure your system without touching code</div>
+        </div>
+        <div class="nav">
+          <a href="/">← Dashboard</a>
+          <a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a>
+          <a href="/health">Health</a>
+        </div>
+      </div>
+
+      ${msg ? `<div style="background:rgba(0,180,90,.15);border:1px solid #0c8a54;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#72f0ab;font-weight:bold;">✅ ${msg}</div>` : ""}
+      ${err ? `<div style="background:rgba(220,70,70,.15);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#ff9a9a;font-weight:bold;">❌ ${err}</div>` : ""}
+
+      <!-- EXECUTION MODE -->
+      <div class="section card" style="margin-bottom:20px;">
+        <h2>🚦 Execution Mode</h2>
+        <p class="muted" style="margin:0 0 16px;">Controls whether trades fire automatically or wait for your approval on the dashboard.</p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+          <div style="background:${isAuto ? "#1a2a1a" : "#0c2a1a"};border:2px solid ${isAuto ? "#555" : "#0c8a54"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
+            <div style="font-size:18px;font-weight:bold;color:${isAuto ? "#9aa4b2" : "#72f0ab"};">✅ APPROVAL MODE</div>
+            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Every signal appears on dashboard. You click Approve before it goes to IG. Safest option.</div>
+            ${!isAuto ? `<div style="color:#72f0ab;font-size:12px;font-weight:bold;margin-top:8px;">← CURRENTLY ACTIVE</div>` : ""}
+          </div>
+          <div style="background:${isAuto ? "#2a1a0a" : "#1a1a1a"};border:2px solid ${isAuto ? "#c75000" : "#555"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
+            <div style="font-size:18px;font-weight:bold;color:${isAuto ? "#ffd978" : "#9aa4b2"};">⚡ AUTO MODE</div>
+            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Trades fire the instant a signal arrives. No approval needed. Only use after extensive demo testing.</div>
+            ${isAuto ? `<div style="color:#ffd978;font-size:12px;font-weight:bold;margin-top:8px;">← CURRENTLY ACTIVE</div>` : ""}
+          </div>
+        </div>
+        <div style="background:rgba(220,70,70,.1);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin:16px 0;color:#ff9a9a;font-size:13px;">
+          ⚠ <strong>Important:</strong> Execution mode is controlled by the EXECUTION_MODE variable in Railway. To change it: go to Railway → Variables → set EXECUTION_MODE to APPROVAL or AUTO → Update Variables. Railway will redeploy automatically.
+        </div>
+        <div style="color:#9aa4b2;font-size:13px;">Current mode from Railway: <strong style="color:#e8ecf1;">${execMode}</strong></div>
+      </div>
+
+      <!-- BROKER SETUP -->
+      <div class="section card" style="margin-bottom:20px;">
+        <h2>🔑 Broker Setup — IG Markets</h2>
+        <p class="muted" style="margin:0 0 16px;">Your IG API credentials. These are stored securely in the database. Leave a field blank to keep the current value.</p>
+        <form method="POST" action="/settings/broker">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px;">
+            <div>
+              <div class="label">Account Mode</div>
+              <div style="display:flex;gap:8px;margin-top:4px;">
+                <button type="submit" name="accountMode" value="DEMO"
+                  style="flex:1;background:${!isLive ? "#0c8a54" : "#2a303a"};border:2px solid ${!isLive ? "#0c8a54" : "#3a4555"};color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">
+                  ${!isLive ? "✅ " : ""}DEMO
+                </button>
+                <button type="submit" name="accountMode" value="LIVE"
+                  style="flex:1;background:${isLive ? "#b43737" : "#2a303a"};border:2px solid ${isLive ? "#b43737" : "#3a4555"};color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">
+                  ${isLive ? "🔴 " : ""}LIVE
+                </button>
+              </div>
+              <div style="color:#9aa4b2;font-size:12px;margin-top:6px;">Current: <strong style="color:${isLive ? "#ff9a9a" : "#72f0ab"}">${accountMode}</strong></div>
+            </div>
+            <div>
+              <div class="label">IG API Key</div>
+              <input type="password" name="ig_api_key" placeholder="Leave blank to keep current — ${igApiKey || "not set"}" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <div class="label">IG Username (Web API login)</div>
+              <input type="text" name="ig_identifier" value="${igIdentifier}" autocomplete="off" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <div class="label">IG Password (Web API login)</div>
+              <input type="password" name="ig_password" placeholder="Leave blank to keep current" style="width:100%;box-sizing:border-box;" />
+            </div>
+          </div>
+          <div style="background:#0f1319;border:1px solid #2a303a;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#9aa4b2;">
+            API URL: <strong style="color:#e8ecf1;">${igBaseUrl}</strong>
+            <span style="margin-left:12px;">Demo: https://demo-api.ig.com/gateway/deal · Live: https://api.ig.com/gateway/deal</span>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button type="submit" name="action" value="save" class="btn-green">Save Broker Settings</button>
+            <button type="submit" name="action" value="test" class="btn-cyan">Test Connection</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- INSTRUMENTS -->
+      <div class="section card" style="margin-bottom:20px;">
+        <h2>📊 Instruments</h2>
+        <p class="muted" style="margin:0 0 16px;">Set the IG epic code and default position size for each market. Use the search tool to find epic codes: <a href="/ig/search?term=Japan+225" target="_blank">Search IG markets ↗</a></p>
+        <form method="POST" action="/settings/instruments">
+          <div style="overflow-x:auto;">
+            <table style="min-width:600px;">
+              <thead><tr>
+                <th>Market</th><th>IG Epic Code</th><th>Default Size</th><th>Status</th>
+              </tr></thead>
+              <tbody>
+                ${[
+                  {key:"JP225",  label:"Japan 225 (Nikkei)",   hint:"IX.D.NIKKEI.IFM.IP"},
+                  {key:"NAS100", label:"Nasdaq 100",            hint:"IX.D.NASDAQ.IFD.IP"},
+                  {key:"DAX40",  label:"Germany 40 (DAX)",     hint:"IX.D.DAX.IFD.IP"},
+                  {key:"SP500",  label:"US 500 (S&P)",         hint:"IX.D.SPTRD.IFD.IP"},
+                  {key:"DOW",    label:"Wall Street (Dow)",     hint:"IX.D.DOW.IFD.IP"},
+                  {key:"FTSE",   label:"UK 100 (FTSE)",        hint:"IX.D.FTSE.IFD.IP"},
+                  {key:"AUS200", label:"Australia 200",        hint:"IX.D.ASX.IFD.IP"}
+                ].map(inst => `
+                  <tr>
+                    <td style="font-weight:bold;">${inst.label}<br><span style="font-size:11px;color:#9aa4b2;">${inst.key}</span></td>
+                    <td>
+                      <input type="text" name="epic_${inst.key}" value="${epics[inst.key]}" placeholder="${inst.hint}" style="width:220px;" />
+                    </td>
+                    <td>
+                      <input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}" min="0.1" step="0.1" style="width:80px;" />
+                    </td>
+                    <td>${epics[inst.key] ? '<span class="pill pill-green">Configured</span>' : '<span class="pill pill-gray">Not set</span>'}</td>
+                  </tr>`).join("")}
+              </tbody>
+            </table>
+          </div>
+          <div style="margin-top:16px;"><button type="submit" class="btn-green">Save Instruments</button></div>
+        </form>
+      </div>
+
+      <!-- RISK MANAGEMENT -->
+      <div class="section card" style="margin-bottom:20px;">
+        <h2>💰 Risk Management</h2>
+        <form method="POST" action="/settings/risk">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px;">
+            <div>
+              <div class="label">USD value per pip</div>
+              <input type="number" name="usdPerPip" min="0.01" step="0.01" value="${settingsCache.usdPerPip || 0.1}" style="width:100%;box-sizing:border-box;" />
+              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">Used to calculate $ risk and profit on trades</div>
+            </div>
+            <div>
+              <div class="label">Default broker size</div>
+              <input type="number" name="defaultSize" min="0.1" step="0.1" value="${settingsCache.ig_default_size || 1}" style="width:100%;box-sizing:border-box;" />
+              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">Used when signal does not specify a size</div>
+            </div>
+            <div>
+              <div class="label">Auto price poll interval (seconds)</div>
+              <input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${settingsCache.pollIntervalSec || 60}" style="width:100%;box-sizing:border-box;" />
+              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">How often the bridge checks price on IG. Min 30s.</div>
+            </div>
+          </div>
+          <div class="checkbox-row">
+            <label><input type="checkbox" name="beAfterTp1" ${settingsCache.beAfterTp1 ? "checked" : ""} /> Move SL to breakeven after TP1 hit</label>
+            <label><input type="checkbox" name="autoCloseAtTp3" ${settingsCache.autoCloseAtTp3 ? "checked" : ""} /> Auto close trade at TP3</label>
+            <label><input type="checkbox" name="autoPriceTrack" ${settingsCache.autoPriceTrack ? "checked" : ""} /> Auto price tracking ON</label>
+          </div>
+          <button type="submit" class="btn-green">Save Risk Settings</button>
+        </form>
+      </div>
+
+      <!-- WEBHOOK INFO -->
+      <div class="section card">
+        <h2>🔗 Webhook & System Info</h2>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;">
+          <div class="stat">
+            <div class="k">Webhook URL (paste in TradingView alerts)</div>
+            <div class="v" style="font-size:12px;word-break:break-all;">https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview</div>
+          </div>
+          <div class="stat">
+            <div class="k">Webhook Secret (must match TradingView alert payload)</div>
+            <div class="v">${process.env.WEBHOOK_SECRET ? "••••••••" + process.env.WEBHOOK_SECRET.slice(-4) : "Not set"}</div>
+          </div>
+          <div class="stat">
+            <div class="k">Execution Mode (Railway variable)</div>
+            <div class="v" style="color:${isAuto ? "#ffd978" : "#72f0ab"};">${execMode}</div>
+          </div>
+          <div class="stat">
+            <div class="k">Database</div>
+            <div class="v" style="color:#98f0ff;">PostgreSQL — persistent</div>
+          </div>
+        </div>
+      </div>
+    `);
+    res.send(html);
+  } catch (err) {
+    console.error("Settings page error:", err);
+    res.status(500).send("Settings error: " + err.message);
+  }
+});
+
+// Save broker settings
+app.post("/settings/broker", async (req, res) => {
+  try {
+    const action = req.body.action || "save";
+
+    // Account mode can come from button value
+    const accountMode = req.body.accountMode || settingsCache.ig_account_mode || "DEMO";
+    const baseUrl = accountMode === "LIVE"
+      ? "https://api.ig.com/gateway/deal"
+      : "https://demo-api.ig.com/gateway/deal";
+
+    await saveSetting("ig_account_mode", accountMode);
+    await saveSetting("ig_base_url", baseUrl);
+
+    // Only update credentials if provided (non-empty)
+    if (req.body.ig_api_key && req.body.ig_api_key.trim()) {
+      await saveSetting("ig_api_key", req.body.ig_api_key.trim());
+    }
+    if (req.body.ig_identifier && req.body.ig_identifier.trim()) {
+      await saveSetting("ig_identifier", req.body.ig_identifier.trim());
+    }
+    if (req.body.ig_password && req.body.ig_password.trim()) {
+      await saveSetting("ig_password", req.body.ig_password.trim());
+    }
+
+    // Reload broker config into ig.js
+    await loadBrokerConfig();
+
+    if (action === "test") {
+      try {
+        const { createSession } = require("./brokers/ig");
+        const session = await createSession();
+        res.redirect("/settings?msg=Connection+successful+—+" + accountMode + "+account+connected");
+      } catch (testErr) {
+        res.redirect("/settings?err=Connection+failed:+" + encodeURIComponent(testErr.message));
+      }
+    } else {
+      res.redirect("/settings?msg=Broker+settings+saved+successfully");
+    }
+  } catch (err) {
+    res.redirect("/settings?err=" + encodeURIComponent(err.message));
+  }
+});
+
+// Save instrument epics and sizes
+app.post("/settings/instruments", async (req, res) => {
+  try {
+    const keys = ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"];
+    for (const key of keys) {
+      if (req.body[`epic_${key}`] !== undefined) {
+        await saveSetting(`epic_${key}`, req.body[`epic_${key}`].trim());
+      }
+      if (req.body[`size_${key}`] !== undefined) {
+        await saveSetting(`size_${key}`, Number(req.body[`size_${key}`]) || 1);
+      }
+    }
+    await loadBrokerConfig(); // reload epics into ig.js
+    res.redirect("/settings?msg=Instruments+saved+successfully");
+  } catch (err) {
+    res.redirect("/settings?err=" + encodeURIComponent(err.message));
+  }
+});
+
+// Save risk management settings
+app.post("/settings/risk", async (req, res) => {
+  try {
+    const usdPerPip = Math.max(0.001, Number(req.body.usdPerPip) || 0.1);
+    const defSize   = Math.max(0.1, Number(req.body.defaultSize) || 1);
+    const pollSec   = Math.max(30, Number(req.body.pollIntervalSec) || 60);
+
+    await saveSetting("usdPerPip",       usdPerPip);
+    await saveSetting("ig_default_size", defSize);
+    await saveSetting("pollIntervalSec", pollSec);
+    await saveSetting("beAfterTp1",      req.body.beAfterTp1     ? 1 : 0);
+    await saveSetting("autoCloseAtTp3",  req.body.autoCloseAtTp3 ? 1 : 0);
+    await saveSetting("autoPriceTrack",  req.body.autoPriceTrack  ? 1 : 0);
+
+    await loadBrokerConfig();
+    if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker();
+    else stopPriceTracker();
+
+    res.redirect("/settings?msg=Risk+settings+saved+successfully");
+  } catch (err) {
+    res.redirect("/settings?err=" + encodeURIComponent(err.message));
+  }
+});
+
 // ---------------------------------------------------------------------------
 // STARTUP
 // ---------------------------------------------------------------------------
@@ -1042,6 +1358,7 @@ async function start() {
   try {
     await initDb();
     await loadSettingsCache();
+    await loadBrokerConfig();
     console.log("[DB] Settings loaded from PostgreSQL");
 
     if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker();
