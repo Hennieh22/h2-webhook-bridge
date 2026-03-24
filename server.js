@@ -209,14 +209,31 @@ async function loadSettingsCache() {
   settingsCache = { ...settingsCache, ...stored };
 }
 
-// Load broker credentials and instrument epics from DB into ig.js
+// Load broker credentials, instrument epics AND TradingView symbol map from DB into ig.js
 async function loadBrokerConfig() {
   const s = settingsCache;
-  const epics = {};
+  const epics   = {};
+  const tvMap   = {};   // { "NI225": "JP225", "JPN225": "JP225", ... }
+
   for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
-    const val = await dbGetSetting(`epic_${key}`, "");
-    if (val) epics[key] = val;
+    const epicVal = await dbGetSetting(`epic_${key}`, "");
+    if (epicVal) epics[key] = epicVal;
+
+    // Also add env fallback
+    const envEpic = process.env[`IG_EPIC_${key}`];
+    if (envEpic && !epics[key]) epics[key] = envEpic;
+
+    // Load TradingView symbol(s) for this market
+    const tvVal = await dbGetSetting(`tv_${key}`, "");
+    if (tvVal) {
+      // Support comma-separated list e.g. "NI225,JP225USD,JPN225"
+      const aliases = tvVal.split(",").map(v => v.trim().toUpperCase()).filter(Boolean);
+      for (const alias of aliases) {
+        tvMap[alias] = key;  // maps TradingView ticker → internal key
+      }
+    }
   }
+
   setConfig({
     baseUrl:      s.ig_base_url     || process.env.IG_BASE_URL     || "https://demo-api.ig.com/gateway/deal",
     apiKey:       s.ig_api_key      || process.env.IG_API_KEY      || "",
@@ -225,9 +242,11 @@ async function loadBrokerConfig() {
     accountMode:  s.ig_account_mode || process.env.IG_ACCOUNT_MODE || "DEMO",
     defaultSize:  Number(s.ig_default_size || process.env.IG_DEFAULT_SIZE || 1),
     currencyCode: s.ig_currency     || process.env.IG_CURRENCY_CODE || "USD",
-    epics
+    epics,
+    tvMap         // TradingView ticker → internal key map
   });
-  console.log("[Config] Broker config loaded from DB/env");
+  console.log("[Config] Broker config loaded. Epic keys:", Object.keys(epics).join(", ") || "none");
+  console.log("[Config] TV symbol map:", JSON.stringify(tvMap));
 }
 
 async function saveSetting(key, value) {
@@ -1025,6 +1044,38 @@ app.post("/webhook/tradingview", async (req, res) => {
           confidence: alertRecord.confidence, brokerSize: alertRecord.brokerSize
         };
         await dbInsertExecution(execRecord);
+
+        // ── AUTO MODE: fire to IG immediately, do not wait for manual approval
+        if (EXECUTION_MODE === "AUTO") {
+          try {
+            console.log("[AUTO] Firing trade immediately:", execRecord.symbol, execRecord.type);
+            const igResult = await placeMarketOrder({
+              symbol:     execRecord.symbol,
+              type:       execRecord.type,
+              sl:         execRecord.sl,
+              brokerSize: execRecord.brokerSize
+            });
+            const dealRef = igResult.response?.dealReference || "n/a";
+            await dbUpdateExecution(execRecord.id, {
+              status:     "EXECUTED",
+              lastAction: "AUTO executed — dealRef: " + dealRef,
+              dealRef
+            });
+            await dbUpdateTrade(tradeId, {
+              lastAction: "AUTO executed via IG — dealRef: " + dealRef
+            });
+            console.log("[AUTO] Trade executed — dealRef:", dealRef);
+          } catch (autoErr) {
+            console.error("[AUTO] Execution failed:", autoErr.message);
+            await dbUpdateExecution(execRecord.id, {
+              status:     "FAILED",
+              lastAction: "AUTO execution failed: " + autoErr.message
+            });
+            await dbUpdateTrade(tradeId, {
+              lastAction: "AUTO execution FAILED: " + autoErr.message
+            });
+          }
+        }
       }
     }
 
@@ -1068,12 +1119,13 @@ app.get("/settings", async (req, res) => {
     const msg = req.query.msg || "";
     const err = req.query.err || "";
 
-    // Load current instrument epics from DB
+    // Load current instrument epics and TV symbols from DB
     const epics = {};
     const epicSizes = {};
     for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
-      epics[key]     = await dbGetSetting(`epic_${key}`, "");
-      epicSizes[key] = await dbGetSetting(`size_${key}`, 1);
+      epics[key]          = await dbGetSetting(`epic_${key}`, "");
+      epicSizes[key]      = await dbGetSetting(`size_${key}`, 1);
+      epics["tv_" + key]  = await dbGetSetting(`tv_${key}`, "");
     }
 
     const accountMode  = s.ig_account_mode || process.env.IG_ACCOUNT_MODE || "DEMO";
@@ -1170,37 +1222,57 @@ app.get("/settings", async (req, res) => {
       <!-- INSTRUMENTS -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>📊 Instruments</h2>
-        <p class="muted" style="margin:0 0 16px;">Set the IG epic code and default position size for each market. Use the search tool to find epic codes: <a href="/ig/search?term=Japan+225" target="_blank">Search IG markets ↗</a></p>
+        <p class="muted" style="margin:0 0 4px;">Map each market to its IG epic code. The <strong style="color:#ffd978;">TradingView Symbol</strong> column is critical — it must exactly match what TradingView sends in the <code>{{ticker}}</code> field of your alert.</p>
+        <div style="background:rgba(220,180,70,.12);border:1px solid #c75000;border-radius:10px;padding:10px 14px;margin:10px 0 16px;font-size:13px;color:#ffd978;">
+          ⚠ <strong>How to find your TradingView ticker:</strong> Open your TradingView chart. Look at the top left of the chart — it shows something like <strong>OANDA:JP225USD</strong> or <strong>NI225</strong>. The part after the colon (or the full name if no colon) is what gets sent as <code>{{ticker}}</code>. Paste that exactly into the TradingView Symbol column below.
+          You can also check <a href="/alerts" style="color:#ffd978;">Alerts JSON</a> to see what symbol arrived from your last alert.
+        </div>
         <form method="POST" action="/settings/instruments">
           <div style="overflow-x:auto;">
-            <table style="min-width:600px;">
+            <table style="min-width:750px;">
               <thead><tr>
-                <th>Market</th><th>IG Epic Code</th><th>Default Size</th><th>Status</th>
+                <th>Market</th>
+                <th>TradingView Symbol <span style="color:#ffd978;font-size:11px;">← what {{ticker}} sends</span></th>
+                <th>IG Epic Code</th>
+                <th>Default Size</th>
+                <th>Status</th>
               </tr></thead>
               <tbody>
                 ${[
-                  {key:"JP225",  label:"Japan 225 (Nikkei)",   hint:"IX.D.NIKKEI.IFM.IP"},
-                  {key:"NAS100", label:"Nasdaq 100",            hint:"IX.D.NASDAQ.IFD.IP"},
-                  {key:"DAX40",  label:"Germany 40 (DAX)",     hint:"IX.D.DAX.IFD.IP"},
-                  {key:"SP500",  label:"US 500 (S&P)",         hint:"IX.D.SPTRD.IFD.IP"},
-                  {key:"DOW",    label:"Wall Street (Dow)",     hint:"IX.D.DOW.IFD.IP"},
-                  {key:"FTSE",   label:"UK 100 (FTSE)",        hint:"IX.D.FTSE.IFD.IP"},
-                  {key:"AUS200", label:"Australia 200",        hint:"IX.D.ASX.IFD.IP"}
-                ].map(inst => `
+                  {key:"JP225",  label:"Japan 225 (Nikkei)",  epicHint:"IX.D.NIKKEI.IFM.IP",  tvHint:"JP225, NI225, JPN225"},
+                  {key:"NAS100", label:"Nasdaq 100",          epicHint:"IX.D.NASDAQ.IFD.IP",  tvHint:"NAS100, NDX, US100"},
+                  {key:"DAX40",  label:"Germany 40 (DAX)",   epicHint:"IX.D.DAX.IFD.IP",     tvHint:"DAX, GER40, DEU40"},
+                  {key:"SP500",  label:"US 500 (S&P)",       epicHint:"IX.D.SPTRD.IFD.IP",   tvHint:"SPX500, US500, SP500"},
+                  {key:"DOW",    label:"Wall Street (Dow)",  epicHint:"IX.D.DOW.IFD.IP",     tvHint:"US30, DJI, DOW"},
+                  {key:"FTSE",   label:"UK 100 (FTSE)",      epicHint:"IX.D.FTSE.IFD.IP",    tvHint:"UK100, FTSE, UKX"},
+                  {key:"AUS200", label:"Australia 200",      epicHint:"IX.D.ASX.IFD.IP",     tvHint:"AUS200, ASX200"}
+                ].map(inst => {
+                  const tvSym = epics["tv_" + inst.key] || "";
+                  return `
                   <tr>
-                    <td style="font-weight:bold;">${inst.label}<br><span style="font-size:11px;color:#9aa4b2;">${inst.key}</span></td>
+                    <td style="font-weight:bold;">${inst.label}</td>
                     <td>
-                      <input type="text" name="epic_${inst.key}" value="${epics[inst.key]}" placeholder="${inst.hint}" style="width:220px;" />
+                      <input type="text" name="tv_${inst.key}" value="${tvSym}"
+                        placeholder="${inst.tvHint}"
+                        style="width:160px;background:rgba(220,180,70,.08);border-color:#c75000;" />
                     </td>
                     <td>
-                      <input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}" min="0.1" step="0.1" style="width:80px;" />
+                      <input type="text" name="epic_${inst.key}" value="${epics[inst.key]}"
+                        placeholder="${inst.epicHint}" style="width:200px;" />
                     </td>
-                    <td>${epics[inst.key] ? '<span class="pill pill-green">Configured</span>' : '<span class="pill pill-gray">Not set</span>'}</td>
-                  </tr>`).join("")}
+                    <td>
+                      <input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}"
+                        min="0.1" step="0.1" style="width:80px;" />
+                    </td>
+                    <td>${epics[inst.key] ? '<span class="pill pill-green">✅ Set</span>' : '<span class="pill pill-gray">Not set</span>'}</td>
+                  </tr>`}).join("")}
               </tbody>
             </table>
           </div>
-          <div style="margin-top:16px;"><button type="submit" class="btn-green">Save Instruments</button></div>
+          <div style="margin-top:16px;display:flex;gap:10px;align-items:center;">
+            <button type="submit" class="btn-green">Save Instruments</button>
+            <span class="muted" style="font-size:13px;">After saving, test with a manual webhook or wait for a TradingView alert to fire</span>
+          </div>
         </form>
       </div>
 
@@ -1308,7 +1380,7 @@ app.post("/settings/broker", async (req, res) => {
   }
 });
 
-// Save instrument epics and sizes
+// Save instrument epics, TV symbols and sizes
 app.post("/settings/instruments", async (req, res) => {
   try {
     const keys = ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"];
@@ -1319,8 +1391,11 @@ app.post("/settings/instruments", async (req, res) => {
       if (req.body[`size_${key}`] !== undefined) {
         await saveSetting(`size_${key}`, Number(req.body[`size_${key}`]) || 1);
       }
+      if (req.body[`tv_${key}`] !== undefined) {
+        await saveSetting(`tv_${key}`, req.body[`tv_${key}`].trim().toUpperCase());
+      }
     }
-    await loadBrokerConfig(); // reload epics into ig.js
+    await loadBrokerConfig(); // reload epics and TV symbol map into ig.js
     res.redirect("/settings?msg=Instruments+saved+successfully");
   } catch (err) {
     res.redirect("/settings?err=" + encodeURIComponent(err.message));
