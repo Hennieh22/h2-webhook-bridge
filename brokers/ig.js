@@ -160,16 +160,18 @@ async function placeMarketOrder(signal) {
   const dealId        = confirm.data?.dealId;
 
   if (dealStatus === "REJECTED") {
-    const reason = rejectReason || "UNKNOWN";
-    let friendly = reason;
-    if (reason === "MARKET_CLOSED" || reason.includes("CLOSED")) {
-      friendly = `Market is closed (${reason}). JP225 trades 2am-4:30am and 5:30am-8:30am SA time`;
-    } else if (reason.includes("INSUFFICIENT")) {
-      friendly = `Insufficient funds or margin (${reason})`;
-    } else if (reason.includes("SIZE")) {
-      friendly = `Invalid size (${reason}) — check minimum size for this instrument`;
-    }
-    throw new Error(`IG rejected the order — ${friendly}`);
+    const reason   = rejectReason || "UNKNOWN";
+    const fullResp = JSON.stringify(confirm.data || {});
+    let friendly   = reason;
+    if (reason === "MARKET_CLOSED"        || reason.includes("CLOSED"))       friendly = `Market is closed (${reason})`;
+    else if (reason.includes("INSUFFICIENT"))                                  friendly = `Insufficient funds or margin (${reason})`;
+    else if (reason.includes("SIZE")      || reason.includes("MINIMUM"))      friendly = `Invalid size (${reason}) — minimum size may not be 1`;
+    else if (reason.includes("FORCE_OPEN"))                                    friendly = `Force open not allowed (${reason})`;
+    else if (reason.includes("EXPIRY"))                                        friendly = `Expiry issue (${reason})`;
+    else if (reason.includes("CURRENCY"))                                      friendly = `Currency mismatch (${reason})`;
+    else if (reason.includes("ATTACHED"))                                      friendly = `Attached order error (${reason})`;
+    else if (reason === "UNKNOWN")                                             friendly = `Unknown rejection — full IG response: ${fullResp}`;
+    throw new Error(`IG rejected: ${friendly}`);
   }
 
   console.log(`[IG] Order ACCEPTED — dealRef: ${dealRef}, dealId: ${dealId}`);
