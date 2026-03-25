@@ -106,7 +106,38 @@ async function createSession() {
   const securityToken = result.headers.get("X-SECURITY-TOKEN");
   if (!cst || !securityToken) throw new Error("IG session created but tokens missing");
 
-  return { cst, securityToken, accountMode: accMode, accountInfo: result.data || {} };
+  const session = { cst, securityToken, accountMode: accMode, accountInfo: result.data || {} };
+
+  // ── Switch to CFD account if the default is Spreadbet
+  // IG accounts can have multiple sub-accounts (CFD + Spreadbet)
+  // The API defaults to whichever was last used — we force CFD
+  try {
+    const accounts = await igFetch("/accounts", { method: "GET" }, session, "1");
+    const allAccounts = accounts.data?.accounts || [];
+    console.log("[IG] Available accounts:", allAccounts.map(a => `${a.accountId}(${a.accountType})`).join(", "));
+
+    // Find a CFD account — prefer the one matching IG_ACCOUNT_ID env if set
+    const preferredId = process.env.IG_ACCOUNT_ID || "";
+    const cfdAccount  = preferredId
+      ? allAccounts.find(a => a.accountId === preferredId)
+      : allAccounts.find(a => a.accountType === "CFD" || a.accountType === "SPREADBET" === false);
+
+    if (cfdAccount && !cfdAccount.preferred) {
+      // Switch to this account
+      await igFetch("/session", {
+        method: "PUT",
+        body: { accountId: cfdAccount.accountId, lightstreamerEndpoint: "" }
+      }, session, "1");
+      console.log("[IG] Switched to account:", cfdAccount.accountId, cfdAccount.accountType);
+    } else if (allAccounts.length > 0) {
+      const current = allAccounts.find(a => a.preferred);
+      console.log("[IG] Using default account:", current?.accountId, current?.accountType);
+    }
+  } catch (accErr) {
+    console.warn("[IG] Account switch check failed (non-fatal):", accErr.message);
+  }
+
+  return session;
 }
 
 function sideToDirection(type) {
@@ -142,9 +173,11 @@ async function placeMarketOrder(signal) {
   }
 
   // ── Step 2: Place the order — returns dealReference
+  // For IG spreadbet/CFD demo accounts (ZA): currencyCode must match account currency
+  // forceOpen: false avoids spreadbet rejection on demo accounts
   const result = await igFetch("/positions/otc", {
     method: "POST",
-    body: { epic, expiry: "DFB", direction, size, orderType: "MARKET", forceOpen: true, guaranteedStop: false, currencyCode: currency }
+    body: { epic, expiry: "DFB", direction, size, orderType: "MARKET", forceOpen: false, guaranteedStop: false, currencyCode: currency }
   }, session, "2");
 
   const dealRef = result.data?.dealReference;
