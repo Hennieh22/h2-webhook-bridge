@@ -69,14 +69,13 @@ async function placeMarketOrder(signal) {
 
   console.log(`[ICMarkets] Placing ${actionType} on ${mtSymbol} size=${volume}`);
 
-  // NOTE: We do NOT send stopLoss or takeProfit in the initial order.
-  // MT5 often rejects orders with stops attached (TRADE_RETCODE_INVALID_STOPS).
-  // The bridge manages SL/TP tracking internally, same approach as IG adapter.
+  // Bare minimum order — no SL, no TP, no comment.
+  // MT5 / MetaAPI rejects orders with invalid or missing stop levels.
+  // Bridge manages SL/TP tracking internally.
   const orderBody = {
     actionType,
-    symbol: mtSymbol,
+    symbol:  mtSymbol,
     volume,
-    comment: `H2Bot ${signal.strategyId || ''}`.trim(),
   };
 
   const result = await metaApiRequest(
@@ -85,17 +84,25 @@ async function placeMarketOrder(signal) {
     orderBody
   );
 
-  // MetaAPI returns orderId and positionId
-  const positionId = result.positionId || result.orderId || null;
+  // MetaAPI returns orderId / positionId on success.
+  // On MT5 rejection it returns HTTP 200 with a stringCode like TRADE_RETCODE_INVALID_STOPS.
+  // We treat anything without an orderId/positionId as a failure.
+  const positionId = result.positionId || null;
   const orderId    = result.orderId    || null;
+  const retCode    = result.stringCode || null;
 
-  console.log(`[ICMarkets] Trade placed — positionId: ${positionId}  orderId: ${orderId}`);
+  console.log(`[ICMarkets] Trade placed — positionId: ${positionId}  orderId: ${orderId}  retCode: ${retCode}`);
+
+  // If MT5 rejected the order, throw so the bridge marks it FAILED
+  if (!positionId && !orderId) {
+    throw new Error(`MT5 rejected order: ${retCode || 'unknown'} — ${result.message || JSON.stringify(result)}`);
+  }
 
   return {
     success:    true,
     positionId,
     orderId,
-    dealRef:    positionId, // bridge uses dealRef as the reference key
+    dealRef:    positionId || orderId,
     raw:        result,
   };
 }
