@@ -69,19 +69,15 @@ async function placeMarketOrder(signal) {
 
   console.log(`[ICMarkets] Placing ${actionType} on ${mtSymbol} size=${volume}`);
 
+  // NOTE: We do NOT send stopLoss or takeProfit in the initial order.
+  // MT5 often rejects orders with stops attached (TRADE_RETCODE_INVALID_STOPS).
+  // The bridge manages SL/TP tracking internally, same approach as IG adapter.
   const orderBody = {
     actionType,
     symbol: mtSymbol,
     volume,
     comment: `H2Bot ${signal.strategyId || ''}`.trim(),
   };
-
-  // Only add SL/TP if they are non-zero numbers
-  const sl  = parseFloat(signal.sl)  || 0;
-  const tp1 = parseFloat(signal.tp1) || 0;
-
-  if (sl  > 0) orderBody.stopLoss   = sl;
-  if (tp1 > 0) orderBody.takeProfit = tp1;
 
   const result = await metaApiRequest(
     'POST',
