@@ -3,7 +3,7 @@ const dotenv  = require("dotenv");
 const { Pool } = require("pg");
 const {
   setConfig,
-  placeMarketOrder,
+  placeMarketOrder: igPlaceMarketOrder,
   getOpenPositions,
   getCurrentPrice,
   modifyStopLevel,
@@ -12,6 +12,11 @@ const {
   getMarketDetails,
   resolveEpic
 } = require("./brokers/ig");
+
+// ── IC Markets via MetaAPI ──────────────────────────────────────────────────
+const {
+  placeMarketOrder: icPlaceMarketOrder
+} = require("./brokers/icmarkets");
 
 dotenv.config();
 
@@ -24,6 +29,20 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "changeme";
 const APP_NAME       = process.env.APP_NAME       || "H2 Webhook Bridge";
 const EXECUTION_MODE = process.env.EXECUTION_MODE || "APPROVAL";
 const DEFAULT_BROKER = process.env.DEFAULT_BROKER || "IG";
+
+// ---------------------------------------------------------------------------
+// BROKER ROUTER — decides which adapter to call based on broker name
+// ---------------------------------------------------------------------------
+async function routePlaceMarketOrder(brokerName, signal) {
+  const b = String(brokerName || DEFAULT_BROKER).toUpperCase();
+  if (b === "ICMARKETS" || b === "IC_MARKETS" || b === "IC") {
+    console.log("[BrokerRouter] Routing to IC Markets (MetaAPI)");
+    return await icPlaceMarketOrder(signal);
+  }
+  // Default: IG Markets
+  console.log("[BrokerRouter] Routing to IG Markets");
+  return await igPlaceMarketOrder(signal);
+}
 
 // ---------------------------------------------------------------------------
 // POSTGRESQL CONNECTION
@@ -66,7 +85,7 @@ async function initDb() {
 }
 
 // ---------------------------------------------------------------------------
-// DB HELPERS — simple wrappers so the rest of the code reads cleanly
+// DB HELPERS
 // ---------------------------------------------------------------------------
 async function dbGetSetting(key, fallback) {
   const r = await db.query("SELECT value FROM settings WHERE key=$1", [key]);
@@ -196,8 +215,7 @@ async function dbCountExecutions() {
 }
 
 // ---------------------------------------------------------------------------
-// SETTINGS CACHE — loaded from DB, updated on save
-// Avoids DB call on every page render
+// SETTINGS CACHE
 // ---------------------------------------------------------------------------
 let settingsCache = {
   usdPerPip: 0.1, beAfterTp1: 1, autoCloseAtTp3: 1,
@@ -209,27 +227,23 @@ async function loadSettingsCache() {
   settingsCache = { ...settingsCache, ...stored };
 }
 
-// Load broker credentials, instrument epics AND TradingView symbol map from DB into ig.js
 async function loadBrokerConfig() {
   const s = settingsCache;
   const epics   = {};
-  const tvMap   = {};   // { "NI225": "JP225", "JPN225": "JP225", ... }
+  const tvMap   = {};
 
   for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
     const epicVal = await dbGetSetting(`epic_${key}`, "");
     if (epicVal) epics[key] = epicVal;
 
-    // Also add env fallback
     const envEpic = process.env[`IG_EPIC_${key}`];
     if (envEpic && !epics[key]) epics[key] = envEpic;
 
-    // Load TradingView symbol(s) for this market
     const tvVal = await dbGetSetting(`tv_${key}`, "");
     if (tvVal) {
-      // Support comma-separated list e.g. "NI225,JP225USD,JPN225"
       const aliases = tvVal.split(",").map(v => v.trim().toUpperCase()).filter(Boolean);
       for (const alias of aliases) {
-        tvMap[alias] = key;  // maps TradingView ticker → internal key
+        tvMap[alias] = key;
       }
     }
   }
@@ -243,10 +257,11 @@ async function loadBrokerConfig() {
     defaultSize:  Number(s.ig_default_size || process.env.IG_DEFAULT_SIZE || 1),
     currencyCode: s.ig_currency     || process.env.IG_CURRENCY_CODE || "USD",
     epics,
-    tvMap         // TradingView ticker → internal key map
+    tvMap
   });
   console.log("[Config] Broker config loaded. Epic keys:", Object.keys(epics).join(", ") || "none");
   console.log("[Config] TV symbol map:", JSON.stringify(tvMap));
+  console.log("[Config] Active broker:", DEFAULT_BROKER);
 }
 
 async function saveSetting(key, value) {
@@ -274,36 +289,29 @@ function getManagerSettings() {
 // UTILITIES
 // ---------------------------------------------------------------------------
 function nowIso() { return new Date().toISOString(); }
-
 function sanitizeString(v, fb = "") { return typeof v === "string" ? v.trim() : fb; }
-
 function sanitizeNumber(v, fb = null) {
   if (v === null || v === undefined || v === "") return fb;
   const n = Number(v);
   return Number.isFinite(n) ? n : fb;
 }
-
 function sanitizeBool(v, fb = 0) {
   if (v === undefined || v === null) return fb;
   if (v === "on" || v === "true" || v === true || v === 1 || v === "1") return 1;
   return 0;
 }
-
 function formatNumber(v, d = 2) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
   return Number(v).toFixed(d);
 }
-
 function calcPipDist(a, b) {
   if (a == null || b == null) return null;
   return Math.abs(Number(a) - Number(b));
 }
-
 function calcMoney(dist, upp) {
   if (dist == null || upp == null) return null;
   return Number(dist) * Number(upp);
 }
-
 function recalcTrade(t) {
   const upp    = Number(getSetting("usdPerPip", 0.1));
   t.usdPerPip  = upp;
@@ -317,7 +325,6 @@ function recalcTrade(t) {
   t.tp3Usd     = calcMoney(t.tp3Pips,  upp);
   return t;
 }
-
 function typePill(type) {
   const t = String(type || "").toUpperCase();
   if (t === "LONG"  || t === "BUY")  return `<span class="pill pill-green">${t}</span>`;
@@ -325,7 +332,6 @@ function typePill(type) {
   if (t === "WAIT"  || t === "DANGER") return `<span class="pill pill-yellow">${t}</span>`;
   return `<span class="pill pill-gray">${t || "UNKNOWN"}</span>`;
 }
-
 function statusPill(s) {
   const v = String(s || "").toUpperCase();
   if (v.includes("OPEN"))      return `<span class="pill pill-green">${v}</span>`;
@@ -428,7 +434,7 @@ async function applyTradeCheck(tradeId, currentPriceInput, source = "manual") {
 }
 
 // ---------------------------------------------------------------------------
-// PHASE C4.2 — AUTO PRICE TRACKER
+// AUTO PRICE TRACKER
 // ---------------------------------------------------------------------------
 let priceTrackerInterval = null;
 let lastPollTime         = null;
@@ -466,7 +472,6 @@ async function runPriceTracker() {
           const before = trade.status;
           await applyTradeCheck(trade.id, price, "auto");
 
-          // Re-fetch to update live price fields
           const updated = await dbGetTradeById(trade.id);
           if (updated) {
             updated.livePrice = price;
@@ -476,7 +481,6 @@ async function runPriceTracker() {
           }
           updatedCount++;
 
-          // Move SL to BE on IG broker
           if (manager.beAfterTp1 && updated && updated.breakEvenMoved && !updated.beMovedOnBroker) {
             const allExecs = await dbGetExecutions(100);
             const exec = allExecs.find(e => e.tradeId === trade.id && e.status === "SENT");
@@ -569,6 +573,7 @@ function renderPage(title, content) {
     .live-price .lp-meta  { color:#9aa4b2; font-size:12px; margin-top:4px; }
     .tracker-bar { background:#111620; border:1px solid #2a303a; border-radius:10px; padding:12px 16px; margin-bottom:20px; display:flex; gap:20px; flex-wrap:wrap; align-items:center; }
     .db-badge { background:rgba(60,190,210,.15); border:1px solid #0b8ea2; color:#98f0ff; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:bold; }
+    .broker-badge { background:rgba(220,180,70,.15); border:1px solid #c75000; color:#ffd978; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:bold; }
     form { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
     input[type="number"] { background:#0f1319; border:1px solid #2a303a; color:#e8ecf1; border-radius:10px; padding:10px 12px; font-size:14px; width:140px; }
     .checkbox-row { display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin:8px 0 14px; }
@@ -649,7 +654,7 @@ app.get("/", async (req, res) => {
         ${e.status === "PENDING APPROVAL" ? `
           <div class="btn-row">
             <form method="POST" action="/execution/${e.id}/approve">
-              <button class="btn-green" type="submit">✅ Approve IG Trade</button>
+              <button class="btn-green" type="submit">✅ Approve Trade</button>
             </form>
             <form method="POST" action="/execution/${e.id}/cancel">
               <button class="btn-red" type="submit">Cancel</button>
@@ -710,7 +715,7 @@ app.get("/", async (req, res) => {
     const html = renderPage(APP_NAME, `
       <div class="topbar">
         <div>
-          <h1>${APP_NAME} <span class="db-badge">💾 PostgreSQL</span></h1>
+          <h1>${APP_NAME} <span class="db-badge">💾 PostgreSQL</span> <span class="broker-badge">📡 ${DEFAULT_BROKER}</span></h1>
           <div class="muted">Phase D1 · Persistent Database + Auto Price Tracking</div>
         </div>
         <div class="nav">
@@ -741,6 +746,7 @@ app.get("/", async (req, res) => {
 
       <div class="grid">
         <div class="card"><div class="label">Bridge Status</div><div class="big success">Online</div></div>
+        <div class="card"><div class="label">Active Broker</div><div class="big" style="color:#ffd978;">${DEFAULT_BROKER}</div></div>
         <div class="card"><div class="label">Alerts Stored</div><div class="big">${countA}</div></div>
         <div class="card"><div class="label">Trades Stored</div><div class="big">${countT}</div></div>
         <div class="card"><div class="label">Executions Stored</div><div class="big">${countE}</div></div>
@@ -863,7 +869,7 @@ app.get("/executions", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// IG LOOKUP
+// IG LOOKUP (still available for market search)
 // ---------------------------------------------------------------------------
 app.get("/ig/search", async (req, res) => {
   try {
@@ -946,11 +952,24 @@ app.post("/execution/:id/approve", async (req, res) => {
   if (!exec) return res.status(404).send("Execution not found");
   if (exec.status === "SENT") return res.redirect("/");
 
+  const brokerName = exec.broker || DEFAULT_BROKER;
+
   try {
-    exec.lastAction = "Sending to IG...";
-    const result = await placeMarketOrder({ symbol: exec.symbol, type: exec.type, sl: exec.sl, brokerSize: exec.brokerSize });
-    exec.status = "SENT"; exec.lastAction = "Sent to IG successfully";
-    exec.brokerResponse = result.response || null; exec.sentAt = nowIso();
+    exec.lastAction = `Sending to ${brokerName}...`;
+
+    const result = await routePlaceMarketOrder(brokerName, {
+      symbol:     exec.symbol,
+      type:       exec.type,
+      sl:         exec.sl,
+      tp1:        exec.tp1,
+      brokerSize: exec.brokerSize,
+      strategyId: exec.strategyId
+    });
+
+    exec.status         = "SENT";
+    exec.lastAction     = `Sent to ${brokerName} successfully`;
+    exec.brokerResponse = result || null;
+    exec.sentAt         = nowIso();
 
     // Link to trade
     const allTrades = await dbGetTrades(50);
@@ -960,13 +979,18 @@ app.post("/execution/:id/approve", async (req, res) => {
     );
     if (linked) {
       exec.tradeId = linked.id;
-      linked.status = "OPEN / TRACKING"; linked.lastAction = "Approved — tracking automatically";
+      linked.status = "OPEN / TRACKING";
+      linked.lastAction = `Approved — sent to ${brokerName}`;
       await dbUpdateTrade(linked.id, linked);
     }
   } catch (err) {
-    exec.status = "FAILED"; exec.lastAction = err.message || "IG execution failed";
+    exec.status     = "FAILED";
+    exec.lastAction = err.message || "Broker execution failed";
+    console.error(`[Approve] ${brokerName} error:`, err.message);
   }
-  await dbUpdateExecution(exec.id, exec); res.redirect("/");
+
+  await dbUpdateExecution(exec.id, exec);
+  res.redirect("/");
 });
 
 app.post("/execution/:id/cancel", async (req, res) => {
@@ -985,6 +1009,10 @@ app.post("/webhook/tradingview", async (req, res) => {
     if (sanitizeString(payload.secret) !== WEBHOOK_SECRET)
       return res.status(401).json({ ok: false, error: "Invalid secret" });
 
+    // Determine broker — signal can override, else use DEFAULT_BROKER
+    const brokerFromSignal = sanitizeString(payload.broker, "").toUpperCase();
+    const activeBroker     = brokerFromSignal || DEFAULT_BROKER;
+
     const alertRecord = {
       id:          `alert_${Date.now()}`,
       receivedAt:  nowIso(),
@@ -998,7 +1026,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       tp3:         sanitizeNumber(payload.tp3),
       confidence:  sanitizeNumber(payload.confidence),
       strategyId:  sanitizeString(payload.strategyId, "H2_DEFAULT"),
-      broker:      sanitizeString(payload.broker, DEFAULT_BROKER),
+      broker:      activeBroker,
       accountMode: sanitizeString(payload.accountMode, "DEMO"),
       brokerSize:  sanitizeNumber(payload.brokerSize, null),
       raw_json:    JSON.stringify(payload)
@@ -1016,6 +1044,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         type: alertRecord.type, symbol: alertRecord.symbol, tf: alertRecord.tf,
         entry, sl, tp1, tp2, tp3, confidence: alertRecord.confidence,
         strategyId: alertRecord.strategyId, status: "OPEN",
+        broker: activeBroker,
         usdPerPip: upp,
         riskPips: calcPipDist(entry, sl),
         tp1Pips:  calcPipDist(entry, tp1),
@@ -1032,54 +1061,66 @@ app.post("/webhook/tradingview", async (req, res) => {
       };
       await dbInsertTrade(trade);
 
-      if (String(alertRecord.broker).toUpperCase() === "IG") {
-        const execRecord = {
-          id: `exec_${Date.now()}`, tradeId, createdAt: nowIso(),
-          status:      EXECUTION_MODE === "AUTO" ? "QUEUED" : "PENDING APPROVAL",
-          lastAction:  EXECUTION_MODE === "AUTO" ? "Queued for auto execution" : "Waiting for approval",
-          strategyId:  alertRecord.strategyId, broker: "IG",
-          accountMode: alertRecord.accountMode, type: alertRecord.type,
-          symbol: alertRecord.symbol, tf: alertRecord.tf,
-          entry, sl, tp1, tp2, tp3,
-          confidence: alertRecord.confidence, brokerSize: alertRecord.brokerSize
-        };
-        await dbInsertExecution(execRecord);
+      const execRecord = {
+        id: `exec_${Date.now()}`, tradeId, createdAt: nowIso(),
+        status:      EXECUTION_MODE === "AUTO" ? "QUEUED" : "PENDING APPROVAL",
+        lastAction:  EXECUTION_MODE === "AUTO" ? "Queued for auto execution" : "Waiting for approval",
+        strategyId:  alertRecord.strategyId,
+        broker:      activeBroker,
+        accountMode: alertRecord.accountMode,
+        type:        alertRecord.type,
+        symbol:      alertRecord.symbol,
+        tf:          alertRecord.tf,
+        entry, sl, tp1, tp2, tp3,
+        confidence:  alertRecord.confidence,
+        brokerSize:  alertRecord.brokerSize
+      };
+      await dbInsertExecution(execRecord);
 
-        // ── AUTO MODE: fire to IG immediately, do not wait for manual approval
-        if (EXECUTION_MODE === "AUTO") {
-          try {
-            console.log("[AUTO] Firing trade immediately:", execRecord.symbol, execRecord.type);
-            const igResult = await placeMarketOrder({
-              symbol:     execRecord.symbol,
-              type:       execRecord.type,
-              sl:         execRecord.sl,
-              brokerSize: execRecord.brokerSize
-            });
-            const dealRef = igResult.response?.dealReference || "n/a";
-            await dbUpdateExecution(execRecord.id, {
-              status:     "EXECUTED",
-              lastAction: "AUTO executed — dealRef: " + dealRef,
-              dealRef
-            });
-            await dbUpdateTrade(tradeId, {
-              lastAction: "AUTO executed via IG — dealRef: " + dealRef
-            });
-            console.log("[AUTO] Trade executed — dealRef:", dealRef);
-          } catch (autoErr) {
-            console.error("[AUTO] Execution failed:", autoErr.message);
-            await dbUpdateExecution(execRecord.id, {
-              status:     "FAILED",
-              lastAction: "AUTO execution failed: " + autoErr.message
-            });
-            await dbUpdateTrade(tradeId, {
-              lastAction: "AUTO execution FAILED: " + autoErr.message
-            });
-          }
+      // ── AUTO MODE: fire immediately
+      if (EXECUTION_MODE === "AUTO") {
+        try {
+          console.log(`[AUTO] Firing trade immediately — broker: ${activeBroker} symbol: ${execRecord.symbol} type: ${execRecord.type}`);
+
+          const result = await routePlaceMarketOrder(activeBroker, {
+            symbol:     execRecord.symbol,
+            type:       execRecord.type,
+            sl:         execRecord.sl,
+            tp1:        execRecord.tp1,
+            brokerSize: execRecord.brokerSize,
+            strategyId: execRecord.strategyId
+          });
+
+          const ref = result.dealRef || result.positionId || result.orderId || "n/a";
+          await dbUpdateExecution(execRecord.id, {
+            ...execRecord,
+            status:         "EXECUTED",
+            lastAction:     `AUTO executed via ${activeBroker} — ref: ${ref}`,
+            brokerResponse: result,
+            dealRef:        ref
+          });
+          await dbUpdateTrade(tradeId, {
+            ...trade,
+            status:     "OPEN / TRACKING",
+            lastAction: `AUTO executed via ${activeBroker} — ref: ${ref}`
+          });
+          console.log(`[AUTO] Trade executed — ref: ${ref}`);
+        } catch (autoErr) {
+          console.error("[AUTO] Execution failed:", autoErr.message);
+          await dbUpdateExecution(execRecord.id, {
+            ...execRecord,
+            status:     "FAILED",
+            lastAction: `AUTO execution failed: ${autoErr.message}`
+          });
+          await dbUpdateTrade(tradeId, {
+            ...trade,
+            lastAction: `AUTO execution FAILED: ${autoErr.message}`
+          });
         }
       }
     }
 
-    console.log("Webhook:", alertRecord.type, alertRecord.symbol, alertRecord.entry);
+    console.log("Webhook:", alertRecord.type, alertRecord.symbol, alertRecord.entry, "→", activeBroker);
     return res.json({ ok: true, message: "Webhook received", alertId: alertRecord.id });
   } catch (err) {
     console.error("Webhook error:", err);
@@ -1099,7 +1140,8 @@ app.get("/health", async (req, res) => {
       database: "PostgreSQL — persistent",
       time: nowIso(),
       alertsStored: cA, tradesStored: cT, executionsStored: cE,
-      executionMode: EXECUTION_MODE, defaultBroker: DEFAULT_BROKER,
+      executionMode: EXECUTION_MODE,
+      defaultBroker: DEFAULT_BROKER,
       autoTracker: priceTrackerInterval ? "running" : "stopped",
       lastPollStatus, lastPollTime,
       ...manager
@@ -1109,9 +1151,8 @@ app.get("/health", async (req, res) => {
   }
 });
 
-
 // ---------------------------------------------------------------------------
-// SETTINGS PAGE — Phase C4.4
+// SETTINGS PAGE
 // ---------------------------------------------------------------------------
 app.get("/settings", async (req, res) => {
   try {
@@ -1119,7 +1160,6 @@ app.get("/settings", async (req, res) => {
     const msg = req.query.msg || "";
     const err = req.query.err || "";
 
-    // Load current instrument epics and TV symbols from DB
     const epics = {};
     const epicSizes = {};
     for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
@@ -1153,6 +1193,13 @@ app.get("/settings", async (req, res) => {
       ${msg ? `<div style="background:rgba(0,180,90,.15);border:1px solid #0c8a54;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#72f0ab;font-weight:bold;">✅ ${msg}</div>` : ""}
       ${err ? `<div style="background:rgba(220,70,70,.15);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#ff9a9a;font-weight:bold;">❌ ${err}</div>` : ""}
 
+      <!-- ACTIVE BROKER DISPLAY -->
+      <div class="section card" style="margin-bottom:20px;">
+        <h2>📡 Active Broker</h2>
+        <div style="font-size:24px;font-weight:bold;color:#ffd978;">${DEFAULT_BROKER}</div>
+        <div class="muted" style="margin-top:8px;font-size:13px;">To change broker: go to Railway → Variables → change DEFAULT_BROKER to IG or ICMARKETS → Update Variables</div>
+      </div>
+
       <!-- EXECUTION MODE -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>🚦 Execution Mode</h2>
@@ -1160,7 +1207,7 @@ app.get("/settings", async (req, res) => {
         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
           <div style="background:${isAuto ? "#1a2a1a" : "#0c2a1a"};border:2px solid ${isAuto ? "#555" : "#0c8a54"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
             <div style="font-size:18px;font-weight:bold;color:${isAuto ? "#9aa4b2" : "#72f0ab"};">✅ APPROVAL MODE</div>
-            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Every signal appears on dashboard. You click Approve before it goes to IG. Safest option.</div>
+            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Every signal appears on dashboard. You click Approve before it goes to broker. Safest option.</div>
             ${!isAuto ? `<div style="color:#72f0ab;font-size:12px;font-weight:bold;margin-top:8px;">← CURRENTLY ACTIVE</div>` : ""}
           </div>
           <div style="background:${isAuto ? "#2a1a0a" : "#1a1a1a"};border:2px solid ${isAuto ? "#c75000" : "#555"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
@@ -1170,15 +1217,15 @@ app.get("/settings", async (req, res) => {
           </div>
         </div>
         <div style="background:rgba(220,70,70,.1);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin:16px 0;color:#ff9a9a;font-size:13px;">
-          ⚠ <strong>Important:</strong> Execution mode is controlled by the EXECUTION_MODE variable in Railway. To change it: go to Railway → Variables → set EXECUTION_MODE to APPROVAL or AUTO → Update Variables. Railway will redeploy automatically.
+          ⚠ <strong>Important:</strong> Execution mode is controlled by the EXECUTION_MODE variable in Railway. To change it: Railway → Variables → set EXECUTION_MODE to APPROVAL or AUTO.
         </div>
-        <div style="color:#9aa4b2;font-size:13px;">Current mode from Railway: <strong style="color:#e8ecf1;">${execMode}</strong></div>
+        <div style="color:#9aa4b2;font-size:13px;">Current mode: <strong style="color:#e8ecf1;">${execMode}</strong></div>
       </div>
 
-      <!-- BROKER SETUP -->
+      <!-- BROKER SETUP (IG) -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>🔑 Broker Setup — IG Markets</h2>
-        <p class="muted" style="margin:0 0 16px;">Your IG API credentials. These are stored securely in the database. Leave a field blank to keep the current value.</p>
+        <p class="muted" style="margin:0 0 16px;">IG API credentials. Leave a field blank to keep the current value.</p>
         <form method="POST" action="/settings/broker">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px;">
             <div>
@@ -1197,24 +1244,23 @@ app.get("/settings", async (req, res) => {
             </div>
             <div>
               <div class="label">IG API Key</div>
-              <input type="password" name="ig_api_key" placeholder="Leave blank to keep current — ${igApiKey || "not set"}" style="width:100%;box-sizing:border-box;" />
+              <input type="password" name="ig_api_key" placeholder="Leave blank to keep — ${igApiKey || "not set"}" style="width:100%;box-sizing:border-box;" />
             </div>
             <div>
-              <div class="label">IG Username (Web API login)</div>
+              <div class="label">IG Username</div>
               <input type="text" name="ig_identifier" value="${igIdentifier}" autocomplete="off" style="width:100%;box-sizing:border-box;" />
             </div>
             <div>
-              <div class="label">IG Password (Web API login)</div>
+              <div class="label">IG Password</div>
               <input type="password" name="ig_password" placeholder="Leave blank to keep current" style="width:100%;box-sizing:border-box;" />
             </div>
           </div>
           <div style="background:#0f1319;border:1px solid #2a303a;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#9aa4b2;">
             API URL: <strong style="color:#e8ecf1;">${igBaseUrl}</strong>
-            <span style="margin-left:12px;">Demo: https://demo-api.ig.com/gateway/deal · Live: https://api.ig.com/gateway/deal</span>
           </div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <button type="submit" name="action" value="save" class="btn-green">Save Broker Settings</button>
-            <button type="submit" name="action" value="test" class="btn-cyan">Test Connection</button>
+            <button type="submit" name="action" value="save" class="btn-green">Save IG Settings</button>
+            <button type="submit" name="action" value="test" class="btn-cyan">Test IG Connection</button>
           </div>
         </form>
       </div>
@@ -1222,56 +1268,41 @@ app.get("/settings", async (req, res) => {
       <!-- INSTRUMENTS -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>📊 Instruments</h2>
-        <p class="muted" style="margin:0 0 4px;">Map each market to its IG epic code. The <strong style="color:#ffd978;">TradingView Symbol</strong> column is critical — it must exactly match what TradingView sends in the <code>{{ticker}}</code> field of your alert.</p>
-        <div style="background:rgba(220,180,70,.12);border:1px solid #c75000;border-radius:10px;padding:10px 14px;margin:10px 0 16px;font-size:13px;color:#ffd978;">
-          ⚠ <strong>How to find your TradingView ticker:</strong> Open your TradingView chart. Look at the top left of the chart — it shows something like <strong>OANDA:JP225USD</strong> or <strong>NI225</strong>. The part after the colon (or the full name if no colon) is what gets sent as <code>{{ticker}}</code>. Paste that exactly into the TradingView Symbol column below.
-          You can also check <a href="/alerts" style="color:#ffd978;">Alerts JSON</a> to see what symbol arrived from your last alert.
-        </div>
+        <p class="muted" style="margin:0 0 4px;">Map each market to its IG epic code and TradingView ticker.</p>
         <form method="POST" action="/settings/instruments">
           <div style="overflow-x:auto;">
             <table style="min-width:750px;">
               <thead><tr>
                 <th>Market</th>
-                <th>TradingView Symbol <span style="color:#ffd978;font-size:11px;">← what {{ticker}} sends</span></th>
+                <th>TradingView Symbol</th>
                 <th>IG Epic Code</th>
                 <th>Default Size</th>
                 <th>Status</th>
               </tr></thead>
               <tbody>
                 ${[
-                  {key:"JP225",  label:"Japan 225 (Nikkei)",  epicHint:"IX.D.NIKKEI.IFM.IP",  tvHint:"JP225, NI225, JPN225"},
-                  {key:"NAS100", label:"Nasdaq 100",          epicHint:"IX.D.NASDAQ.IFD.IP",  tvHint:"NAS100, NDX, US100"},
-                  {key:"DAX40",  label:"Germany 40 (DAX)",   epicHint:"IX.D.DAX.IFD.IP",     tvHint:"DAX, GER40, DEU40"},
-                  {key:"SP500",  label:"US 500 (S&P)",       epicHint:"IX.D.SPTRD.IFD.IP",   tvHint:"SPX500, US500, SP500"},
-                  {key:"DOW",    label:"Wall Street (Dow)",  epicHint:"IX.D.DOW.IFD.IP",     tvHint:"US30, DJI, DOW"},
-                  {key:"FTSE",   label:"UK 100 (FTSE)",      epicHint:"IX.D.FTSE.IFD.IP",    tvHint:"UK100, FTSE, UKX"},
+                  {key:"JP225",  label:"Japan 225 (Nikkei)",  epicHint:"IX.D.NIKKEI.IFM.IP",  tvHint:"JP225, NI225"},
+                  {key:"NAS100", label:"Nasdaq 100",          epicHint:"IX.D.NASDAQ.IFD.IP",  tvHint:"NAS100, NDX"},
+                  {key:"DAX40",  label:"Germany 40 (DAX)",   epicHint:"IX.D.DAX.IFD.IP",     tvHint:"DAX, GER40"},
+                  {key:"SP500",  label:"US 500 (S&P)",       epicHint:"IX.D.SPTRD.IFD.IP",   tvHint:"SPX500, US500"},
+                  {key:"DOW",    label:"Wall Street (Dow)",  epicHint:"IX.D.DOW.IFD.IP",     tvHint:"US30, DJI"},
+                  {key:"FTSE",   label:"UK 100 (FTSE)",      epicHint:"IX.D.FTSE.IFD.IP",    tvHint:"UK100, FTSE"},
                   {key:"AUS200", label:"Australia 200",      epicHint:"IX.D.ASX.IFD.IP",     tvHint:"AUS200, ASX200"}
                 ].map(inst => {
                   const tvSym = epics["tv_" + inst.key] || "";
                   return `
                   <tr>
                     <td style="font-weight:bold;">${inst.label}</td>
-                    <td>
-                      <input type="text" name="tv_${inst.key}" value="${tvSym}"
-                        placeholder="${inst.tvHint}"
-                        style="width:160px;background:rgba(220,180,70,.08);border-color:#c75000;" />
-                    </td>
-                    <td>
-                      <input type="text" name="epic_${inst.key}" value="${epics[inst.key]}"
-                        placeholder="${inst.epicHint}" style="width:200px;" />
-                    </td>
-                    <td>
-                      <input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}"
-                        min="0.1" step="0.1" style="width:80px;" />
-                    </td>
+                    <td><input type="text" name="tv_${inst.key}" value="${tvSym}" placeholder="${inst.tvHint}" style="width:160px;" /></td>
+                    <td><input type="text" name="epic_${inst.key}" value="${epics[inst.key]}" placeholder="${inst.epicHint}" style="width:200px;" /></td>
+                    <td><input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}" min="0.1" step="0.1" style="width:80px;" /></td>
                     <td>${epics[inst.key] ? '<span class="pill pill-green">✅ Set</span>' : '<span class="pill pill-gray">Not set</span>'}</td>
                   </tr>`}).join("")}
               </tbody>
             </table>
           </div>
-          <div style="margin-top:16px;display:flex;gap:10px;align-items:center;">
+          <div style="margin-top:16px;">
             <button type="submit" class="btn-green">Save Instruments</button>
-            <span class="muted" style="font-size:13px;">After saving, test with a manual webhook or wait for a TradingView alert to fire</span>
           </div>
         </form>
       </div>
@@ -1284,17 +1315,14 @@ app.get("/settings", async (req, res) => {
             <div>
               <div class="label">USD value per pip</div>
               <input type="number" name="usdPerPip" min="0.01" step="0.01" value="${settingsCache.usdPerPip || 0.1}" style="width:100%;box-sizing:border-box;" />
-              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">Used to calculate $ risk and profit on trades</div>
             </div>
             <div>
               <div class="label">Default broker size</div>
               <input type="number" name="defaultSize" min="0.1" step="0.1" value="${settingsCache.ig_default_size || 1}" style="width:100%;box-sizing:border-box;" />
-              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">Used when signal does not specify a size</div>
             </div>
             <div>
               <div class="label">Auto price poll interval (seconds)</div>
               <input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${settingsCache.pollIntervalSec || 60}" style="width:100%;box-sizing:border-box;" />
-              <div style="color:#9aa4b2;font-size:12px;margin-top:4px;">How often the bridge checks price on IG. Min 30s.</div>
             </div>
           </div>
           <div class="checkbox-row">
@@ -1311,16 +1339,20 @@ app.get("/settings", async (req, res) => {
         <h2>🔗 Webhook & System Info</h2>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;">
           <div class="stat">
-            <div class="k">Webhook URL (paste in TradingView alerts)</div>
+            <div class="k">Webhook URL</div>
             <div class="v" style="font-size:12px;word-break:break-all;">https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview</div>
           </div>
           <div class="stat">
-            <div class="k">Webhook Secret (must match TradingView alert payload)</div>
+            <div class="k">Webhook Secret</div>
             <div class="v">${process.env.WEBHOOK_SECRET ? "••••••••" + process.env.WEBHOOK_SECRET.slice(-4) : "Not set"}</div>
           </div>
           <div class="stat">
-            <div class="k">Execution Mode (Railway variable)</div>
+            <div class="k">Execution Mode</div>
             <div class="v" style="color:${isAuto ? "#ffd978" : "#72f0ab"};">${execMode}</div>
+          </div>
+          <div class="stat">
+            <div class="k">Active Broker</div>
+            <div class="v" style="color:#ffd978;">${DEFAULT_BROKER}</div>
           </div>
           <div class="stat">
             <div class="k">Database</div>
@@ -1336,12 +1368,9 @@ app.get("/settings", async (req, res) => {
   }
 });
 
-// Save broker settings
 app.post("/settings/broker", async (req, res) => {
   try {
     const action = req.body.action || "save";
-
-    // Account mode can come from button value
     const accountMode = req.body.accountMode || settingsCache.ig_account_mode || "DEMO";
     const baseUrl = accountMode === "LIVE"
       ? "https://api.ig.com/gateway/deal"
@@ -1350,27 +1379,22 @@ app.post("/settings/broker", async (req, res) => {
     await saveSetting("ig_account_mode", accountMode);
     await saveSetting("ig_base_url", baseUrl);
 
-    // Only update credentials if provided (non-empty)
-    if (req.body.ig_api_key && req.body.ig_api_key.trim()) {
+    if (req.body.ig_api_key && req.body.ig_api_key.trim())
       await saveSetting("ig_api_key", req.body.ig_api_key.trim());
-    }
-    if (req.body.ig_identifier && req.body.ig_identifier.trim()) {
+    if (req.body.ig_identifier && req.body.ig_identifier.trim())
       await saveSetting("ig_identifier", req.body.ig_identifier.trim());
-    }
-    if (req.body.ig_password && req.body.ig_password.trim()) {
+    if (req.body.ig_password && req.body.ig_password.trim())
       await saveSetting("ig_password", req.body.ig_password.trim());
-    }
 
-    // Reload broker config into ig.js
     await loadBrokerConfig();
 
     if (action === "test") {
       try {
         const { createSession } = require("./brokers/ig");
-        const session = await createSession();
-        res.redirect("/settings?msg=Connection+successful+—+" + accountMode + "+account+connected");
+        await createSession();
+        res.redirect("/settings?msg=IG+connection+successful+—+" + accountMode + "+account+connected");
       } catch (testErr) {
-        res.redirect("/settings?err=Connection+failed:+" + encodeURIComponent(testErr.message));
+        res.redirect("/settings?err=IG+connection+failed:+" + encodeURIComponent(testErr.message));
       }
     } else {
       res.redirect("/settings?msg=Broker+settings+saved+successfully");
@@ -1380,38 +1404,29 @@ app.post("/settings/broker", async (req, res) => {
   }
 });
 
-// Save instrument epics, TV symbols and sizes
 app.post("/settings/instruments", async (req, res) => {
   try {
     const keys = ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"];
     for (const key of keys) {
-      if (req.body[`epic_${key}`] !== undefined) {
+      if (req.body[`epic_${key}`] !== undefined)
         await saveSetting(`epic_${key}`, req.body[`epic_${key}`].trim());
-      }
-      if (req.body[`size_${key}`] !== undefined) {
+      if (req.body[`size_${key}`] !== undefined)
         await saveSetting(`size_${key}`, Number(req.body[`size_${key}`]) || 1);
-      }
-      if (req.body[`tv_${key}`] !== undefined) {
+      if (req.body[`tv_${key}`] !== undefined)
         await saveSetting(`tv_${key}`, req.body[`tv_${key}`].trim().toUpperCase());
-      }
     }
-    await loadBrokerConfig(); // reload epics and TV symbol map into ig.js
+    await loadBrokerConfig();
     res.redirect("/settings?msg=Instruments+saved+successfully");
   } catch (err) {
     res.redirect("/settings?err=" + encodeURIComponent(err.message));
   }
 });
 
-// Save risk management settings
 app.post("/settings/risk", async (req, res) => {
   try {
-    const usdPerPip = Math.max(0.001, Number(req.body.usdPerPip) || 0.1);
-    const defSize   = Math.max(0.1, Number(req.body.defaultSize) || 1);
-    const pollSec   = Math.max(30, Number(req.body.pollIntervalSec) || 60);
-
-    await saveSetting("usdPerPip",       usdPerPip);
-    await saveSetting("ig_default_size", defSize);
-    await saveSetting("pollIntervalSec", pollSec);
+    await saveSetting("usdPerPip",       Math.max(0.001, Number(req.body.usdPerPip) || 0.1));
+    await saveSetting("ig_default_size", Math.max(0.1, Number(req.body.defaultSize) || 1));
+    await saveSetting("pollIntervalSec", Math.max(30, Number(req.body.pollIntervalSec) || 60));
     await saveSetting("beAfterTp1",      req.body.beAfterTp1     ? 1 : 0);
     await saveSetting("autoCloseAtTp3",  req.body.autoCloseAtTp3 ? 1 : 0);
     await saveSetting("autoPriceTrack",  req.body.autoPriceTrack  ? 1 : 0);
@@ -1435,12 +1450,15 @@ async function start() {
     await loadSettingsCache();
     await loadBrokerConfig();
     console.log("[DB] Settings loaded from PostgreSQL");
+    console.log("[Broker] Active broker:", DEFAULT_BROKER);
 
     if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker();
 
     app.listen(PORT, () => {
       console.log(`${APP_NAME} listening on port ${PORT}`);
       console.log(`Database: PostgreSQL`);
+      console.log(`Broker: ${DEFAULT_BROKER}`);
+      console.log(`Execution mode: ${EXECUTION_MODE}`);
       console.log(`Auto tracker: ${priceTrackerInterval ? "started" : "stopped"}`);
     });
   } catch (err) {
