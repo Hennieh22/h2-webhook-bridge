@@ -78,19 +78,23 @@ async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 
     return { success: true, skipped: true };
   }
 
+  // positionId must be numeric for MetaAPI POSITION_MODIFY
+  const numericPosId = Number(positionId);
+
   const modBody = {
     actionType: 'POSITION_MODIFY',
-    positionId: String(positionId),
+    positionId: numericPosId,
   };
   if (hasSL) modBody.stopLoss   = sl;
   if (hasTP) modBody.takeProfit = tp;
 
   console.log(`[ICMarkets] Setting SL/TP on position ${positionId} — SL: ${hasSL ? sl : 'none'}  TP: ${hasTP ? tp : 'none'}`);
+  console.log(`[ICMarkets] Modify body: ${JSON.stringify(modBody)}`);
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      // Small delay before first attempt — MT5 needs a moment to register the position
-      await sleep(delayMs);
+      // Delay increases with each attempt — gives MT5 more time to register position
+      await sleep(delayMs * attempt);
 
       const result = await metaApiRequest(
         'POST',
@@ -99,16 +103,20 @@ async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 
       );
 
       const code = result.stringCode || '';
+      console.log(`[ICMarkets] setSlTp attempt ${attempt} full response: ${JSON.stringify(result)}`);
 
-      // TRADE_RETCODE_DONE means success on MT5
-      if (code === 'TRADE_RETCODE_DONE' || result.positionId || result.orderId) {
-        console.log(`[ICMarkets] SL/TP set successfully on attempt ${attempt}`);
+      if (code === 'TRADE_RETCODE_DONE') {
+        console.log(`[ICMarkets] SL/TP confirmed on attempt ${attempt} — SL: ${sl}  TP: ${tp}`);
         return { success: true, raw: result };
       }
 
-      // TRADE_RETCODE_INVALID_STOPS means the stops were rejected (wrong price, too close, etc)
+      if (code === 'TRADE_RETCODE_NO_CHANGES') {
+        console.log(`[ICMarkets] SL/TP already set to these values`);
+        return { success: true, raw: result };
+      }
+
       if (code === 'TRADE_RETCODE_INVALID_STOPS') {
-        console.log(`[ICMarkets] SL/TP rejected by MT5 — invalid stop levels (prices may be too close to market)`);
+        console.log(`[ICMarkets] SL/TP rejected — INVALID_STOPS. SL: ${sl} TP: ${tp}`);
         return { success: false, reason: 'INVALID_STOPS', raw: result };
       }
 
