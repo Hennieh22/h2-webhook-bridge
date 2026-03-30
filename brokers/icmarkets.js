@@ -2,18 +2,12 @@
 
 require('dotenv').config();
 
-// ─────────────────────────────────────────────────────────────
-//  MetaAPI REST adapter for IC Markets MT5
-//  Uses MetaAPI cloud REST API — no SDK needed, pure HTTP calls
-// ─────────────────────────────────────────────────────────────
-
 const METAAPI_TOKEN      = process.env.METAAPI_TOKEN      || '';
 const METAAPI_ACCOUNT_ID = process.env.METAAPI_ACCOUNT_ID || '';
 const METAAPI_REGION     = process.env.METAAPI_REGION     || 'london';
 
 const BASE_URL = `https://mt-client-api-v1.${METAAPI_REGION}.agiliumtrade.ai`;
 
-// ─── Symbol map ───────────────────────────────────────────────
 function resolveSymbol(symbol) {
   const map = {
     JP225:  process.env.MT5_SYMBOL_JP225  || 'JP225Cash',
@@ -27,7 +21,6 @@ function resolveSymbol(symbol) {
   return map[symbol] || symbol;
 }
 
-// ─── Core HTTP helper ─────────────────────────────────────────
 async function metaApiRequest(method, path, body = null) {
   const url = `${BASE_URL}${path}`;
   const options = {
@@ -40,6 +33,7 @@ async function metaApiRequest(method, path, body = null) {
   if (body) options.body = JSON.stringify(body);
 
   console.log(`[ICMarkets] ${method} ${path}`);
+  if (body) console.log(`[ICMarkets] Body: ${JSON.stringify(body)}`);
 
   const res  = await fetch(url, options);
   const text = await res.text();
@@ -47,7 +41,7 @@ async function metaApiRequest(method, path, body = null) {
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
-  console.log(`[ICMarkets] Response ${res.status}:`, JSON.stringify(data).substring(0, 300));
+  console.log(`[ICMarkets] Response ${res.status}: ${JSON.stringify(data).substring(0, 400)}`);
 
   if (!res.ok) {
     throw new Error(`MetaAPI error ${res.status}: ${JSON.stringify(data)}`);
@@ -56,45 +50,62 @@ async function metaApiRequest(method, path, body = null) {
   return data;
 }
 
-// ─── sleep helper ─────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ─── setSlTp ─────────────────────────────────────────────────
-// Adds SL and TP to an open position.
-// MT5 needs the position to be fully registered before we can modify it,
-// so we retry a few times with a short delay if the first attempt fails.
-async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 1500) {
+// Read back a single position to verify SL/TP were actually set
+async function verifyPosition(positionId) {
+  try {
+    const positions = await metaApiRequest(
+      'GET',
+      `/users/current/accounts/${METAAPI_ACCOUNT_ID}/positions`
+    );
+    if (!Array.isArray(positions)) return null;
+    const pos = positions.find(p => String(p.id) === String(positionId));
+    if (pos) {
+      console.log(`[ICMarkets] Position ${positionId} verified — SL: ${pos.stopLoss ?? 'none'}  TP: ${pos.takeProfit ?? 'none'}  Price: ${pos.currentPrice}`);
+    } else {
+      console.log(`[ICMarkets] Position ${positionId} not found in open positions`);
+    }
+    return pos;
+  } catch (err) {
+    console.log(`[ICMarkets] verifyPosition error: ${err.message}`);
+    return null;
+  }
+}
+
+async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 2000) {
   const sl = parseFloat(stopLoss);
   const tp = parseFloat(takeProfit);
 
-  // Only set valid numbers — skip zeros and nulls
   const hasSL = sl && sl > 0;
   const hasTP = tp && tp > 0;
 
   if (!hasSL && !hasTP) {
-    console.log('[ICMarkets] setSlTp — no valid SL or TP provided, skipping modify');
+    console.log('[ICMarkets] setSlTp — no valid SL or TP provided, skipping');
     return { success: true, skipped: true };
   }
 
-  // positionId must be numeric for MetaAPI POSITION_MODIFY
-  const numericPosId = Number(positionId);
-
+  // Try both string and numeric positionId — MetaAPI behaviour varies by account type
   const modBody = {
     actionType: 'POSITION_MODIFY',
-    positionId: numericPosId,
+    positionId: String(positionId),  // string first
   };
   if (hasSL) modBody.stopLoss   = sl;
   if (hasTP) modBody.takeProfit = tp;
 
   console.log(`[ICMarkets] Setting SL/TP on position ${positionId} — SL: ${hasSL ? sl : 'none'}  TP: ${hasTP ? tp : 'none'}`);
-  console.log(`[ICMarkets] Modify body: ${JSON.stringify(modBody)}`);
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      // Delay increases with each attempt — gives MT5 more time to register position
       await sleep(delayMs * attempt);
+
+      // On attempt 2+, try with numeric positionId
+      if (attempt === 2) {
+        modBody.positionId = Number(positionId);
+        console.log(`[ICMarkets] Attempt ${attempt}: switching to numeric positionId`);
+      }
 
       const result = await metaApiRequest(
         'POST',
@@ -103,40 +114,44 @@ async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 
       );
 
       const code = result.stringCode || '';
-      console.log(`[ICMarkets] setSlTp attempt ${attempt} full response: ${JSON.stringify(result)}`);
+      console.log(`[ICMarkets] setSlTp attempt ${attempt} code: ${code}`);
 
-      if (code === 'TRADE_RETCODE_DONE') {
-        console.log(`[ICMarkets] SL/TP confirmed on attempt ${attempt} — SL: ${sl}  TP: ${tp}`);
-        return { success: true, raw: result };
-      }
+      if (code === 'TRADE_RETCODE_DONE' || code === 'TRADE_RETCODE_NO_CHANGES') {
+        // Verify the stops actually landed by reading back the position
+        await sleep(1000);
+        const pos = await verifyPosition(positionId);
 
-      if (code === 'TRADE_RETCODE_NO_CHANGES') {
-        console.log(`[ICMarkets] SL/TP already set to these values`);
-        return { success: true, raw: result };
+        if (pos) {
+          const slOk = !hasSL || (pos.stopLoss && Math.abs(pos.stopLoss - sl) < 1);
+          const tpOk = !hasTP || (pos.takeProfit && Math.abs(pos.takeProfit - tp) < 1);
+
+          if (slOk && tpOk) {
+            console.log(`[ICMarkets] ✅ SL/TP CONFIRMED in MT5 — SL: ${pos.stopLoss}  TP: ${pos.takeProfit}`);
+            return { success: true, verified: true, raw: result };
+          } else {
+            console.log(`[ICMarkets] ⚠️ MetaAPI said DONE but stops NOT in MT5 — SL: ${pos.stopLoss}  TP: ${pos.takeProfit}`);
+            console.log(`[ICMarkets] Expected SL: ${sl}  TP: ${tp}`);
+            // Try again on next attempt
+          }
+        }
       }
 
       if (code === 'TRADE_RETCODE_INVALID_STOPS') {
-        console.log(`[ICMarkets] SL/TP rejected — INVALID_STOPS. SL: ${sl} TP: ${tp}`);
+        console.log(`[ICMarkets] INVALID_STOPS — SL: ${sl}  TP: ${tp} — check min stop distance`);
         return { success: false, reason: 'INVALID_STOPS', raw: result };
       }
 
-      console.log(`[ICMarkets] setSlTp attempt ${attempt} — unexpected code: ${code}`);
-
     } catch (err) {
-      console.log(`[ICMarkets] setSlTp attempt ${attempt} failed: ${err.message}`);
+      console.log(`[ICMarkets] setSlTp attempt ${attempt} error: ${err.message}`);
       if (attempt === retries) {
-        console.log('[ICMarkets] All SL/TP set attempts failed — trade is open but without SL/TP on broker');
         return { success: false, reason: err.message };
       }
     }
   }
 
-  return { success: false, reason: 'max retries reached' };
+  return { success: false, reason: 'max retries — stops not confirmed in MT5' };
 }
 
-// ─── placeMarketOrder ─────────────────────────────────────────
-// Places the order then immediately sets SL and TP on the open position.
-// signal: { type, symbol, brokerSize, sl, tp1, tp2, entry }
 async function placeMarketOrder(signal) {
   const mtSymbol   = resolveSymbol(signal.symbol);
   const actionType = signal.type === 'LONG' ? 'ORDER_TYPE_BUY' : 'ORDER_TYPE_SELL';
@@ -144,13 +159,7 @@ async function placeMarketOrder(signal) {
 
   console.log(`[ICMarkets] Placing ${actionType} on ${mtSymbol} size=${volume}`);
 
-  // Step 1: Place bare market order — no SL/TP in initial order
-  // MT5 rejects orders with SL/TP when the price is not yet known at fill time
-  const orderBody = {
-    actionType,
-    symbol: mtSymbol,
-    volume,
-  };
+  const orderBody = { actionType, symbol: mtSymbol, volume };
 
   const result = await metaApiRequest(
     'POST',
@@ -168,9 +177,14 @@ async function placeMarketOrder(signal) {
     throw new Error(`MT5 rejected order: ${retCode || 'unknown'} — ${result.message || JSON.stringify(result)}`);
   }
 
-  // Step 2: Set SL and TP on the now-open position
-  // Use tp1 as the TP on the broker — this is the structural first target
-  // The bridge tracks tp2 and tp3 internally
+  // Verify the position exists before trying to modify it
+  console.log(`[ICMarkets] Waiting for position to register in MT5...`);
+  await sleep(3000);
+  const posCheck = await verifyPosition(positionId);
+  if (!posCheck) {
+    console.log(`[ICMarkets] Position not yet visible — will still attempt SL/TP set`);
+  }
+
   let slTpResult = { success: false, skipped: true };
 
   if (positionId) {
@@ -179,29 +193,23 @@ async function placeMarketOrder(signal) {
 
     slTpResult = await setSlTp(positionId, sl, tp);
 
-    if (slTpResult.success && !slTpResult.skipped) {
-      console.log(`[ICMarkets] SL/TP confirmed on MT5 — SL: ${sl}  TP1: ${tp}`);
-    } else if (!slTpResult.success) {
-      console.log(`[ICMarkets] Warning: SL/TP not set on MT5 — reason: ${slTpResult.reason}`);
-      console.log(`[ICMarkets] Trade is open. Bridge will track SL/TP internally.`);
+    if (!slTpResult.success && !slTpResult.skipped) {
+      console.log(`[ICMarkets] ⚠️ SL/TP not confirmed — reason: ${slTpResult.reason}`);
+      console.log(`[ICMarkets] Trade is open at broker. Bridge tracks SL/TP internally.`);
     }
-  } else {
-    console.log('[ICMarkets] No positionId returned — cannot set SL/TP (order may be pending)');
   }
 
   return {
-    success:       true,
+    success:    true,
     positionId,
     orderId,
-    dealRef:       positionId || orderId,
-    slTpSet:       slTpResult.success && !slTpResult.skipped,
-    slTpReason:    slTpResult.reason  || null,
-    raw:           result,
+    dealRef:    positionId || orderId,
+    slTpSet:    slTpResult.success === true && !slTpResult.skipped,
+    slTpReason: slTpResult.reason || null,
+    raw:        result,
   };
 }
 
-// ─── modifyPosition ───────────────────────────────────────────
-// Moves the stop loss on an open position (used for BE move)
 async function modifyPosition(positionId, newStopLoss, newTakeProfit = null) {
   console.log(`[ICMarkets] Modifying position ${positionId} — SL: ${newStopLoss}  TP: ${newTakeProfit || 'unchanged'}`);
 
@@ -210,7 +218,6 @@ async function modifyPosition(positionId, newStopLoss, newTakeProfit = null) {
     positionId: String(positionId),
     stopLoss:   parseFloat(newStopLoss),
   };
-
   if (newTakeProfit && parseFloat(newTakeProfit) > 0) {
     body.takeProfit = parseFloat(newTakeProfit);
   }
@@ -224,50 +231,30 @@ async function modifyPosition(positionId, newStopLoss, newTakeProfit = null) {
   return { success: true, raw: result };
 }
 
-// ─── closePosition ────────────────────────────────────────────
 async function closePosition(positionId) {
   console.log(`[ICMarkets] Closing position ${positionId}`);
-
   const result = await metaApiRequest(
     'POST',
     `/users/current/accounts/${METAAPI_ACCOUNT_ID}/trade`,
-    {
-      actionType: 'POSITION_CLOSE_ID',
-      positionId: String(positionId),
-    }
+    { actionType: 'POSITION_CLOSE_ID', positionId: String(positionId) }
   );
-
   return { success: true, raw: result };
 }
 
-// ─── getOpenPositions ─────────────────────────────────────────
 async function getOpenPositions() {
-  return await metaApiRequest(
-    'GET',
-    `/users/current/accounts/${METAAPI_ACCOUNT_ID}/positions`
-  );
+  return await metaApiRequest('GET', `/users/current/accounts/${METAAPI_ACCOUNT_ID}/positions`);
 }
 
-// ─── getAccountInfo ───────────────────────────────────────────
 async function getAccountInfo() {
-  return await metaApiRequest(
-    'GET',
-    `/users/current/accounts/${METAAPI_ACCOUNT_ID}/account-information`
-  );
+  return await metaApiRequest('GET', `/users/current/accounts/${METAAPI_ACCOUNT_ID}/account-information`);
 }
 
-// ─── searchSymbols ────────────────────────────────────────────
 async function searchSymbols(query) {
   try {
-    const result = await metaApiRequest(
-      'GET',
-      `/users/current/accounts/${METAAPI_ACCOUNT_ID}/symbols`
-    );
+    const result = await metaApiRequest('GET', `/users/current/accounts/${METAAPI_ACCOUNT_ID}/symbols`);
     if (Array.isArray(result)) {
       return result.filter(s =>
-        (typeof s === 'string' ? s : s.symbol || '')
-          .toLowerCase()
-          .includes(query.toLowerCase())
+        (typeof s === 'string' ? s : s.symbol || '').toLowerCase().includes(query.toLowerCase())
       );
     }
     return result;
