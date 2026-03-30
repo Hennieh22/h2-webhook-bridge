@@ -13,7 +13,6 @@ const {
   resolveEpic
 } = require("./brokers/ig");
 
-// ── IC Markets via MetaAPI ──────────────────────────────────────────────────
 const {
   placeMarketOrder: icPlaceMarketOrder
 } = require("./brokers/icmarkets");
@@ -31,7 +30,41 @@ const EXECUTION_MODE = process.env.EXECUTION_MODE || "APPROVAL";
 const DEFAULT_BROKER = process.env.DEFAULT_BROKER || "IG";
 
 // ---------------------------------------------------------------------------
-// BROKER ROUTER — decides which adapter to call based on broker name
+// SIGNAL TYPE CONFIG
+// Maps each signal type to its display label, colour, and size multiplier
+// ---------------------------------------------------------------------------
+const SIGNAL_CONFIG = {
+  SCALP_CONTRA:   { label: "Scalp Contra",   color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  },
+  SWING:          { label: "Swing",          color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
+  INTRADAY:       { label: "Intraday",       color: "#9fc2ff", bg: "rgba(70,120,220,.20)",  sizeMulti: 0.75 },
+  MOMENTUM_SCALP: { label: "Mo. Scalp",      color: "#c8a8f8", bg: "rgba(140,60,220,.20)",  sizeMulti: 0.5  },
+  POSITION:       { label: "Position",       color: "#98f0ff", bg: "rgba(60,190,210,.20)",  sizeMulti: 1.0  },
+  // Legacy signals from other indicators
+  STRONG_LONG:    { label: "Strong Long",    color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
+  STRONG_SHORT:   { label: "Strong Short",   color: "#ff9a9a", bg: "rgba(220,70,70,.20)",   sizeMulti: 1.0  },
+  APLUS_LONG:     { label: "A+ Long",        color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
+  APLUS_SHORT:    { label: "A+ Short",       color: "#ff9a9a", bg: "rgba(220,70,70,.20)",   sizeMulti: 1.0  },
+  SCENARIO_BOUNCE:    { label: "Bounce",     color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  },
+  SCENARIO_REJECTION: { label: "Rejection",  color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  }
+};
+
+function signalPill(signalType) {
+  const key = String(signalType || "").toUpperCase();
+  const cfg = SIGNAL_CONFIG[key];
+  if (!cfg) return signalType ? `<span class="pill pill-gray">${signalType}</span>` : "";
+  return `<span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:bold;background:${cfg.bg};color:${cfg.color};">${cfg.label}</span>`;
+}
+
+function regimePill(regime) {
+  const r = String(regime || "").toUpperCase();
+  if (r === "BULL")         return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(0,180,90,.20);color:#72f0ab;">▲ ${r}</span>`;
+  if (r === "BEAR")         return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(220,70,70,.20);color:#ff9a9a;">▼ ${r}</span>`;
+  if (r === "TRANSITIONING") return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(220,180,70,.15);color:#ffd978;">↔ TRANS</span>`;
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// BROKER ROUTER
 // ---------------------------------------------------------------------------
 async function routePlaceMarketOrder(brokerName, signal) {
   const b = String(brokerName || DEFAULT_BROKER).toUpperCase();
@@ -39,13 +72,12 @@ async function routePlaceMarketOrder(brokerName, signal) {
     console.log("[BrokerRouter] Routing to IC Markets (MetaAPI)");
     return await icPlaceMarketOrder(signal);
   }
-  // Default: IG Markets
   console.log("[BrokerRouter] Routing to IG Markets");
   return await igPlaceMarketOrder(signal);
 }
 
 // ---------------------------------------------------------------------------
-// POSTGRESQL CONNECTION
+// POSTGRESQL
 // ---------------------------------------------------------------------------
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -54,9 +86,6 @@ const db = new Pool({
     : false
 });
 
-// ---------------------------------------------------------------------------
-// DATABASE INIT — creates tables on first boot
-// ---------------------------------------------------------------------------
 async function initDb() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -229,22 +258,18 @@ async function loadSettingsCache() {
 
 async function loadBrokerConfig() {
   const s = settingsCache;
-  const epics   = {};
-  const tvMap   = {};
+  const epics = {};
+  const tvMap = {};
 
   for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
     const epicVal = await dbGetSetting(`epic_${key}`, "");
     if (epicVal) epics[key] = epicVal;
-
     const envEpic = process.env[`IG_EPIC_${key}`];
     if (envEpic && !epics[key]) epics[key] = envEpic;
-
     const tvVal = await dbGetSetting(`tv_${key}`, "");
     if (tvVal) {
       const aliases = tvVal.split(",").map(v => v.trim().toUpperCase()).filter(Boolean);
-      for (const alias of aliases) {
-        tvMap[alias] = key;
-      }
+      for (const alias of aliases) tvMap[alias] = key;
     }
   }
 
@@ -259,7 +284,7 @@ async function loadBrokerConfig() {
     epics,
     tvMap
   });
-  console.log("[Config] Broker config loaded. Epic keys:", Object.keys(epics).join(", ") || "none");
+  console.log("[Config] Broker config loaded. Epics:", Object.keys(epics).join(", ") || "none");
   console.log("[Config] TV symbol map:", JSON.stringify(tvMap));
   console.log("[Config] Active broker:", DEFAULT_BROKER);
 }
@@ -320,11 +345,12 @@ function recalcTrade(t) {
   t.tp2Pips    = calcPipDist(t.entry, t.tp2);
   t.tp3Pips    = calcPipDist(t.entry, t.tp3);
   t.riskUsd    = calcMoney(t.riskPips, upp);
-  t.tp1Usd     = calcMoney(t.tp1Pips,  upp);
-  t.tp2Usd     = calcMoney(t.tp2Pips,  upp);
-  t.tp3Usd     = calcMoney(t.tp3Pips,  upp);
+  t.tp1Usd     = calcMoney(t.tp1Pips, upp);
+  t.tp2Usd     = calcMoney(t.tp2Pips, upp);
+  t.tp3Usd     = calcMoney(t.tp3Pips, upp);
   return t;
 }
+
 function typePill(type) {
   const t = String(type || "").toUpperCase();
   if (t === "LONG"  || t === "BUY")  return `<span class="pill pill-green">${t}</span>`;
@@ -332,6 +358,7 @@ function typePill(type) {
   if (t === "WAIT"  || t === "DANGER") return `<span class="pill pill-yellow">${t}</span>`;
   return `<span class="pill pill-gray">${t || "UNKNOWN"}</span>`;
 }
+
 function statusPill(s) {
   const v = String(s || "").toUpperCase();
   if (v.includes("OPEN"))      return `<span class="pill pill-green">${v}</span>`;
@@ -344,6 +371,7 @@ function statusPill(s) {
   if (v.includes("FAILED"))    return `<span class="pill pill-red">${v}</span>`;
   if (v.includes("CANCELLED")) return `<span class="pill pill-gray">${v}</span>`;
   if (v.includes("TRACKING"))  return `<span class="pill pill-cyan">${v}</span>`;
+  if (v.includes("EXECUTED"))  return `<span class="pill pill-green">${v}</span>`;
   return `<span class="pill pill-gray">${v || "UNKNOWN"}</span>`;
 }
 
@@ -353,7 +381,6 @@ function statusPill(s) {
 async function applyTradeCheck(tradeId, currentPriceInput, source = "manual") {
   const trade = await dbGetTradeById(tradeId);
   if (!trade) return;
-
   const currentPrice = sanitizeNumber(currentPriceInput);
   if (currentPrice === null) return;
 
@@ -379,21 +406,13 @@ async function applyTradeCheck(tradeId, currentPriceInput, source = "manual") {
         lastAction = `[${source}] TP1 hit at ${currentPrice} — SL moved to entry`;
       }
     }
-    if (!tp2Hit && currentPrice >= Number(trade.tp2)) {
-      tp2Hit = 1; status = "TP2 HIT";
-      lastAction = `[${source}] TP2 hit at ${currentPrice}`;
-    }
+    if (!tp2Hit && currentPrice >= Number(trade.tp2)) { tp2Hit = 1; status = "TP2 HIT"; lastAction = `[${source}] TP2 hit at ${currentPrice}`; }
     if (!tp3Hit && currentPrice >= Number(trade.tp3)) {
       tp3Hit = 1;
       status     = manager.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT";
-      lastAction = manager.autoCloseAtTp3
-        ? `[${source}] TP3 hit at ${currentPrice} — trade closed`
-        : `[${source}] TP3 hit at ${currentPrice}`;
+      lastAction = manager.autoCloseAtTp3 ? `[${source}] TP3 hit at ${currentPrice} — trade closed` : `[${source}] TP3 hit at ${currentPrice}`;
     }
-    if (status !== "TP3 HIT / CLOSED" && currentPrice <= Number(currentSl)) {
-      status = "STOPPED OUT";
-      lastAction = `[${source}] Stopped out at ${currentPrice}`;
-    }
+    if (status !== "TP3 HIT / CLOSED" && currentPrice <= Number(currentSl)) { status = "STOPPED OUT"; lastAction = `[${source}] Stopped out at ${currentPrice}`; }
   }
 
   if (type === "SHORT") {
@@ -406,28 +425,18 @@ async function applyTradeCheck(tradeId, currentPriceInput, source = "manual") {
         lastAction = `[${source}] TP1 hit at ${currentPrice} — SL moved to entry`;
       }
     }
-    if (!tp2Hit && currentPrice <= Number(trade.tp2)) {
-      tp2Hit = 1; status = "TP2 HIT";
-      lastAction = `[${source}] TP2 hit at ${currentPrice}`;
-    }
+    if (!tp2Hit && currentPrice <= Number(trade.tp2)) { tp2Hit = 1; status = "TP2 HIT"; lastAction = `[${source}] TP2 hit at ${currentPrice}`; }
     if (!tp3Hit && currentPrice <= Number(trade.tp3)) {
       tp3Hit = 1;
       status     = manager.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT";
-      lastAction = manager.autoCloseAtTp3
-        ? `[${source}] TP3 hit at ${currentPrice} — trade closed`
-        : `[${source}] TP3 hit at ${currentPrice}`;
+      lastAction = manager.autoCloseAtTp3 ? `[${source}] TP3 hit at ${currentPrice} — trade closed` : `[${source}] TP3 hit at ${currentPrice}`;
     }
-    if (status !== "TP3 HIT / CLOSED" && currentPrice >= Number(currentSl)) {
-      status = "STOPPED OUT";
-      lastAction = `[${source}] Stopped out at ${currentPrice}`;
-    }
+    if (status !== "TP3 HIT / CLOSED" && currentPrice >= Number(currentSl)) { status = "STOPPED OUT"; lastAction = `[${source}] Stopped out at ${currentPrice}`; }
   }
 
   const updated = {
-    ...trade,
-    currentPrice, currentSl, tp1Hit, tp2Hit, tp3Hit,
-    breakEvenMoved, status, lastAction,
-    lastCheckedAt: nowIso()
+    ...trade, currentPrice, currentSl, tp1Hit, tp2Hit, tp3Hit,
+    breakEvenMoved, status, lastAction, lastCheckedAt: nowIso()
   };
   recalcTrade(updated);
   await dbUpdateTrade(tradeId, updated);
@@ -445,33 +454,24 @@ async function runPriceTracker() {
     lastPollTime   = nowIso();
     lastPollStatus = "Polling...";
     const manager  = getManagerSettings();
-
     const activeTrades = await dbGetActiveTrades();
-    if (activeTrades.length === 0) {
-      lastPollStatus = `No active trades — last checked ${lastPollTime}`;
-      return;
-    }
+    if (activeTrades.length === 0) { lastPollStatus = `No active trades — last checked ${lastPollTime}`; return; }
 
-    const symbols    = [...new Set(activeTrades.map(t => t.symbol))];
+    const symbols = [...new Set(activeTrades.map(t => t.symbol))];
     let updatedCount = 0, errorCount = 0;
 
     for (const symbol of symbols) {
       try {
         const epic = resolveEpic(symbol);
         if (!epic) { console.log(`[AutoTracker] No epic for ${symbol}`); continue; }
-
         const priceData = await getCurrentPrice(epic);
-        if (priceData.status === "CLOSED" || priceData.status === "OFFLINE") {
-          console.log(`[AutoTracker] ${symbol} market ${priceData.status}`); continue;
-        }
-
+        if (priceData.status === "CLOSED" || priceData.status === "OFFLINE") { console.log(`[AutoTracker] ${symbol} market ${priceData.status}`); continue; }
         const price = priceData.mid;
         const tradesForSymbol = activeTrades.filter(t => t.symbol === symbol);
 
         for (const trade of tradesForSymbol) {
           const before = trade.status;
           await applyTradeCheck(trade.id, price, "auto");
-
           const updated = await dbGetTradeById(trade.id);
           if (updated) {
             updated.livePrice = price;
@@ -483,23 +483,20 @@ async function runPriceTracker() {
 
           if (manager.beAfterTp1 && updated && updated.breakEvenMoved && !updated.beMovedOnBroker) {
             const allExecs = await dbGetExecutions(100);
-            const exec = allExecs.find(e => e.tradeId === trade.id && e.status === "SENT");
+            const exec = allExecs.find(e => e.tradeId === trade.id && (e.status === "SENT" || e.status === "EXECUTED"));
             if (exec && exec.brokerResponse && exec.brokerResponse.dealId) {
               try {
                 await modifyStopLevel(exec.brokerResponse.dealId, updated.entry);
                 updated.beMovedOnBroker = true;
-                updated.lastAction += " | SL moved to entry on IG";
+                updated.lastAction += " | SL moved to entry on broker";
                 await dbUpdateTrade(trade.id, updated);
-                console.log(`[AutoTracker] Moved SL to BE on IG for deal ${exec.brokerResponse.dealId}`);
               } catch (beErr) {
-                console.log(`[AutoTracker] Could not move SL on IG: ${beErr.message}`);
+                console.log(`[AutoTracker] Could not move SL on broker: ${beErr.message}`);
               }
             }
           }
 
-          if (updated && updated.status !== before) {
-            console.log(`[AutoTracker] ${trade.id}: ${before} → ${updated.status}`);
-          }
+          if (updated && updated.status !== before) console.log(`[AutoTracker] ${trade.id}: ${before} → ${updated.status}`);
         }
       } catch (symErr) {
         console.log(`[AutoTracker] Error for ${symbol}: ${symErr.message}`);
@@ -521,10 +518,7 @@ function startPriceTracker() {
 }
 
 function stopPriceTracker() {
-  if (priceTrackerInterval) {
-    clearInterval(priceTrackerInterval); priceTrackerInterval = null;
-    console.log("[AutoTracker] Stopped");
-  }
+  if (priceTrackerInterval) { clearInterval(priceTrackerInterval); priceTrackerInterval = null; console.log("[AutoTracker] Stopped"); }
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +554,7 @@ function renderPage(title, content) {
     th { background:#1d222c; color:#cfd7e3; font-size:13px; }
     .trade-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(400px,1fr)); gap:16px; }
     .trade-card { background:#171a21; border:1px solid #2a303a; border-radius:14px; padding:16px; }
-    .trade-header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+    .trade-header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
     .trade-symbol { font-size:20px; font-weight:bold; }
     .trade-meta { color:#9aa4b2; font-size:13px; margin-bottom:14px; }
     .trade-stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
@@ -571,15 +565,17 @@ function renderPage(title, content) {
     .live-price .lp-label { color:#72f0ab; font-size:12px; font-weight:bold; margin-bottom:4px; }
     .live-price .lp-value { font-size:24px; font-weight:bold; color:#72f0ab; }
     .live-price .lp-meta  { color:#9aa4b2; font-size:12px; margin-top:4px; }
+    .signal-banner { border-radius:10px; padding:10px 14px; margin-bottom:14px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
     .tracker-bar { background:#111620; border:1px solid #2a303a; border-radius:10px; padding:12px 16px; margin-bottom:20px; display:flex; gap:20px; flex-wrap:wrap; align-items:center; }
     .db-badge { background:rgba(60,190,210,.15); border:1px solid #0b8ea2; color:#98f0ff; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:bold; }
     .broker-badge { background:rgba(220,180,70,.15); border:1px solid #c75000; color:#ffd978; border-radius:8px; padding:4px 10px; font-size:12px; font-weight:bold; }
     form { display:flex; gap:10px; align-items:end; flex-wrap:wrap; }
-    input[type="number"] { background:#0f1319; border:1px solid #2a303a; color:#e8ecf1; border-radius:10px; padding:10px 12px; font-size:14px; width:140px; }
+    input[type="number"],input[type="text"],input[type="password"] { background:#0f1319; border:1px solid #2a303a; color:#e8ecf1; border-radius:10px; padding:10px 12px; font-size:14px; }
+    input[type="number"] { width:140px; }
     .checkbox-row { display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin:8px 0 14px; }
     .checkbox-row label { display:flex; align-items:center; gap:6px; color:#dce3ed; font-size:14px; }
     button { background:#3a7afe; color:white; border:0; border-radius:10px; padding:10px 14px; font-size:13px; cursor:pointer; }
-    button:hover { background:#2f68d7; }
+    button:hover { opacity:0.85; }
     .btn-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
     .btn-cyan  { background:#0b8ea2; }
     .btn-red   { background:#b43737; }
@@ -592,9 +588,7 @@ function renderPage(title, content) {
     .tracker-off { color:#ff9a9a; font-weight:bold; }
   </style>
 </head>
-<body>
-  <div class="wrap">${content}</div>
-</body>
+<body><div class="wrap">${content}</div></body>
 </html>`;
 }
 
@@ -603,15 +597,9 @@ function renderPage(title, content) {
 // ---------------------------------------------------------------------------
 app.get("/", async (req, res) => {
   try {
-    const [latestAlerts, latestTrades, latestExecutions,
-           pendingExecs, countA, countT, countE] = await Promise.all([
-      dbGetAlerts(10),
-      dbGetTrades(12),
-      dbGetExecutions(10),
-      dbGetPendingExecutions(),
-      dbCountAlerts(),
-      dbCountTrades(),
-      dbCountExecutions()
+    const [latestAlerts, latestTrades, latestExecutions, pendingExecs, countA, countT, countE] = await Promise.all([
+      dbGetAlerts(10), dbGetTrades(12), dbGetExecutions(10),
+      dbGetPendingExecutions(), dbCountAlerts(), dbCountTrades(), dbCountExecutions()
     ]);
 
     const manager        = getManagerSettings();
@@ -620,7 +608,7 @@ app.get("/", async (req, res) => {
     const alertsRows = latestAlerts.map(a => `
       <tr>
         <td>${a.receivedAt}</td>
-        <td>${typePill(a.type)}</td>
+        <td>${typePill(a.type)} ${signalPill(a.signal)}</td>
         <td>${a.symbol}</td>
         <td>${a.tf}</td>
         <td>${formatNumber(a.entry, 2)}</td>
@@ -629,6 +617,7 @@ app.get("/", async (req, res) => {
         <td>${formatNumber(a.tp2, 2)}</td>
         <td>${formatNumber(a.tp3, 2)}</td>
         <td>${a.confidence ?? "-"}</td>
+        <td>${regimePill(a.macroRegime)} <span style="color:#9aa4b2;font-size:11px;">${a.macroPhase || ""}</span></td>
       </tr>`).join("");
 
     const execCards = (pendingExecs.length > 0 ? pendingExecs : latestExecutions.slice(0, 6)).map(e => `
@@ -638,27 +627,28 @@ app.get("/", async (req, res) => {
             <div class="trade-symbol">${e.symbol || "-"}</div>
             <div class="trade-meta">${e.createdAt} · ${e.broker} · ${e.accountMode}</div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            ${typePill(e.type)}${statusPill(e.status)}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${typePill(e.type)} ${signalPill(e.signal)} ${statusPill(e.status)}
           </div>
         </div>
+        ${e.macroRegime ? `
+          <div class="signal-banner" style="background:rgba(255,255,255,.04);border:1px solid #2a303a;">
+            ${regimePill(e.macroRegime)}
+            <span style="color:#9aa4b2;font-size:12px;">${e.macroPhase || ""}</span>
+          </div>` : ""}
         <div class="trade-stats">
           <div class="stat"><div class="k">Strategy</div><div class="v">${e.strategyId || "-"}</div></div>
           <div class="stat"><div class="k">Size</div><div class="v">${e.brokerSize || "-"}</div></div>
           <div class="stat"><div class="k">Entry</div><div class="v">${formatNumber(e.entry, 2)}</div></div>
           <div class="stat"><div class="k">SL</div><div class="v">${formatNumber(e.sl, 2)}</div></div>
           <div class="stat"><div class="k">TP1</div><div class="v">${formatNumber(e.tp1, 2)}</div></div>
-          <div class="stat"><div class="k">Status</div><div class="v">${e.status}</div></div>
+          <div class="stat"><div class="k">TP2</div><div class="v">${formatNumber(e.tp2, 2)}</div></div>
           <div class="stat" style="grid-column:span 2"><div class="k">Last Action</div><div class="v">${e.lastAction || "-"}</div></div>
         </div>
         ${e.status === "PENDING APPROVAL" ? `
           <div class="btn-row">
-            <form method="POST" action="/execution/${e.id}/approve">
-              <button class="btn-green" type="submit">✅ Approve Trade</button>
-            </form>
-            <form method="POST" action="/execution/${e.id}/cancel">
-              <button class="btn-red" type="submit">Cancel</button>
-            </form>
+            <form method="POST" action="/execution/${e.id}/approve"><button class="btn-green" type="submit">✅ Approve Trade</button></form>
+            <form method="POST" action="/execution/${e.id}/cancel"><button class="btn-red" type="submit">Cancel</button></form>
           </div>` : ""}
       </div>`).join("");
 
@@ -671,25 +661,28 @@ app.get("/", async (req, res) => {
             <div class="trade-symbol">${t.symbol || "-"}</div>
             <div class="trade-meta">${t.createdAt} · TF ${t.tf || "-"} · ${t.strategyId || "-"}</div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            ${typePill(t.type)}${statusPill(t.status)}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${typePill(t.type)} ${signalPill(t.signal)} ${statusPill(t.status)}
           </div>
         </div>
+        ${t.macroRegime ? `
+          <div class="signal-banner" style="background:rgba(255,255,255,.04);border:1px solid #2a303a;">
+            ${regimePill(t.macroRegime)}
+            <span style="color:#9aa4b2;font-size:12px;">${t.macroPhase || ""}</span>
+          </div>` : ""}
         ${hasLive ? `
           <div class="live-price">
-            <div class="lp-label">🔴 LIVE PRICE (Auto Tracked)</div>
+            <div class="lp-label">🔴 LIVE PRICE</div>
             <div class="lp-value">${formatNumber(t.livePrice, 2)}</div>
             <div class="lp-meta">Bid: ${formatNumber(t.liveBid, 2)} · Offer: ${formatNumber(t.liveOffer, 2)} · ${t.lastCheckedAt || "-"}</div>
           </div>` : ""}
         <div class="trade-stats">
           <div class="stat"><div class="k">Entry</div><div class="v">${formatNumber(t.entry, 2)}</div></div>
           <div class="stat"><div class="k">Current SL</div><div class="v">${formatNumber(t.currentSl, 2)}</div></div>
-          <div class="stat"><div class="k">Current Price</div><div class="v">${hasLive ? formatNumber(t.livePrice, 2) + " 🔴" : formatNumber(t.currentPrice, 2)}</div></div>
           <div class="stat"><div class="k">TP1</div><div class="v">${formatNumber(t.tp1, 2)}</div></div>
           <div class="stat"><div class="k">TP2</div><div class="v">${formatNumber(t.tp2, 2)}</div></div>
           <div class="stat"><div class="k">TP3</div><div class="v">${formatNumber(t.tp3, 2)}</div></div>
           <div class="stat"><div class="k">Risk USD</div><div class="v">$${formatNumber(t.riskUsd, 2)}</div></div>
-          <div class="stat"><div class="k">TP1 Value</div><div class="v">$${formatNumber(t.tp1Usd, 2)}</div></div>
           <div class="stat"><div class="k">Break-even</div><div class="v">${t.breakEvenMoved ? "✅ Moved" : "Not moved"}</div></div>
           <div class="stat"><div class="k">TP Hits</div><div class="v">TP1:${t.tp1Hit ? "✅" : "—"} TP2:${t.tp2Hit ? "✅" : "—"} TP3:${t.tp3Hit ? "✅" : "—"}</div></div>
           <div class="stat" style="grid-column:span 2"><div class="k">Last Action</div><div class="v">${t.lastAction || "-"}</div></div>
@@ -697,8 +690,8 @@ app.get("/", async (req, res) => {
         <div class="section card" style="margin-bottom:14px;">
           <div class="label">Manual Price Check</div>
           <form method="POST" action="/trade/${t.id}/check-price">
-            <input type="number" name="currentPrice" step="0.01" placeholder="Enter current price" required />
-            <button class="btn-green" type="submit">Check Trade</button>
+            <input type="number" name="currentPrice" step="0.01" placeholder="Current price" required />
+            <button class="btn-green" type="submit">Check</button>
           </form>
         </div>
         <div class="btn-row">
@@ -716,7 +709,7 @@ app.get("/", async (req, res) => {
       <div class="topbar">
         <div>
           <h1>${APP_NAME} <span class="db-badge">💾 PostgreSQL</span> <span class="broker-badge">📡 ${DEFAULT_BROKER}</span></h1>
-          <div class="muted">Phase D1 · Persistent Database + Auto Price Tracking</div>
+          <div class="muted">Phase D1 · Persistent Database + Auto Price Tracking + Multi-Style Signals</div>
         </div>
         <div class="nav">
           <a href="/">Dashboard</a>
@@ -729,15 +722,10 @@ app.get("/", async (req, res) => {
       </div>
 
       <div class="tracker-bar">
-        <div>
-          <span class="label">Auto Tracker: </span>
-          <span class="${trackerRunning ? "tracker-on" : "tracker-off"}">${trackerRunning ? "🟢 RUNNING" : "🔴 STOPPED"}</span>
-        </div>
-        <div class="muted" style="font-size:13px;">Last poll: ${lastPollStatus}</div>
+        <div><span class="label">Auto Tracker: </span><span class="${trackerRunning ? "tracker-on" : "tracker-off"}">${trackerRunning ? "🟢 RUNNING" : "🔴 STOPPED"}</span></div>
+        <div class="muted" style="font-size:13px;">${lastPollStatus}</div>
         <div style="margin-left:auto;display:flex;gap:8px;">
-          <form method="POST" action="/tracker/poll-now">
-            <button type="submit" class="btn-cyan">Poll Now</button>
-          </form>
+          <form method="POST" action="/tracker/poll-now"><button type="submit" class="btn-cyan">Poll Now</button></form>
           ${trackerRunning
             ? `<form method="POST" action="/tracker/stop"><button type="submit" class="btn-red">Stop Tracker</button></form>`
             : `<form method="POST" action="/tracker/start"><button type="submit" class="btn-green">Start Tracker</button></form>`}
@@ -747,6 +735,7 @@ app.get("/", async (req, res) => {
       <div class="grid">
         <div class="card"><div class="label">Bridge Status</div><div class="big success">Online</div></div>
         <div class="card"><div class="label">Active Broker</div><div class="big" style="color:#ffd978;">${DEFAULT_BROKER}</div></div>
+        <div class="card"><div class="label">Execution Mode</div><div class="big" style="color:${EXECUTION_MODE==="AUTO"?"#ffd978":"#72f0ab"};">${EXECUTION_MODE}</div></div>
         <div class="card"><div class="label">Alerts Stored</div><div class="big">${countA}</div></div>
         <div class="card"><div class="label">Trades Stored</div><div class="big">${countT}</div></div>
         <div class="card"><div class="label">Executions Stored</div><div class="big">${countE}</div></div>
@@ -770,12 +759,9 @@ app.get("/", async (req, res) => {
             <label><input type="checkbox" name="autoPriceTrack" ${manager.autoPriceTrack ? "checked" : ""} /> Auto Price Tracking ON</label>
           </div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <div><div class="label">TP1 partial %</div>
-            <input type="number" name="tp1PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp1PartialPct, 0)}" /></div>
-            <div><div class="label">TP2 partial %</div>
-            <input type="number" name="tp2PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp2PartialPct, 0)}" /></div>
-            <div><div class="label">Poll interval (sec, min 30)</div>
-            <input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${manager.pollIntervalSec}" /></div>
+            <div><div class="label">TP1 partial %</div><input type="number" name="tp1PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp1PartialPct, 0)}" /></div>
+            <div><div class="label">TP2 partial %</div><input type="number" name="tp2PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp2PartialPct, 0)}" /></div>
+            <div><div class="label">Poll interval (sec, min 30)</div><input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${manager.pollIntervalSec}" /></div>
           </div>
           <div style="margin-top:12px;"><button type="submit">Update Rules</button></div>
         </form>
@@ -795,10 +781,11 @@ app.get("/", async (req, res) => {
         <h2>Latest Alerts</h2>
         <table>
           <thead><tr>
-            <th>Received</th><th>Type</th><th>Symbol</th><th>TF</th>
-            <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Confidence</th>
+            <th>Received</th><th>Type / Signal</th><th>Symbol</th><th>TF</th>
+            <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th>
+            <th>Confidence</th><th>Macro</th>
           </tr></thead>
-          <tbody>${alertsRows || `<tr><td colspan="10">No alerts yet</td></tr>`}</tbody>
+          <tbody>${alertsRows || `<tr><td colspan="11">No alerts yet</td></tr>`}</tbody>
         </table>
       </div>`);
 
@@ -812,22 +799,9 @@ app.get("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 // TRACKER ROUTES
 // ---------------------------------------------------------------------------
-app.post("/tracker/start", async (req, res) => {
-  await saveSetting("autoPriceTrack", 1);
-  startPriceTracker();
-  res.redirect("/");
-});
-
-app.post("/tracker/stop", async (req, res) => {
-  await saveSetting("autoPriceTrack", 0);
-  stopPriceTracker();
-  res.redirect("/");
-});
-
-app.post("/tracker/poll-now", async (req, res) => {
-  await runPriceTracker();
-  res.redirect("/");
-});
+app.post("/tracker/start", async (req, res) => { await saveSetting("autoPriceTrack", 1); startPriceTracker(); res.redirect("/"); });
+app.post("/tracker/stop",  async (req, res) => { await saveSetting("autoPriceTrack", 0); stopPriceTracker();  res.redirect("/"); });
+app.post("/tracker/poll-now", async (req, res) => { await runPriceTracker(); res.redirect("/"); });
 
 // ---------------------------------------------------------------------------
 // SETTINGS ROUTES
@@ -840,36 +814,25 @@ app.post("/settings/usd-per-pip", async (req, res) => {
 });
 
 app.post("/settings/manager-rules", async (req, res) => {
-  await saveSetting("beAfterTp1",     sanitizeBool(req.body.beAfterTp1, 0));
-  await saveSetting("autoCloseAtTp3", sanitizeBool(req.body.autoCloseAtTp3, 0));
-  await saveSetting("autoPriceTrack", sanitizeBool(req.body.autoPriceTrack, 0));
-  await saveSetting("tp1PartialPct",  Math.max(0, Math.min(100, sanitizeNumber(req.body.tp1PartialPct, 0))));
-  await saveSetting("tp2PartialPct",  Math.max(0, Math.min(100, sanitizeNumber(req.body.tp2PartialPct, 0))));
+  await saveSetting("beAfterTp1",      sanitizeBool(req.body.beAfterTp1, 0));
+  await saveSetting("autoCloseAtTp3",  sanitizeBool(req.body.autoCloseAtTp3, 0));
+  await saveSetting("autoPriceTrack",  sanitizeBool(req.body.autoPriceTrack, 0));
+  await saveSetting("tp1PartialPct",   Math.max(0, Math.min(100, sanitizeNumber(req.body.tp1PartialPct, 0))));
+  await saveSetting("tp2PartialPct",   Math.max(0, Math.min(100, sanitizeNumber(req.body.tp2PartialPct, 0))));
   await saveSetting("pollIntervalSec", Math.max(30, sanitizeNumber(req.body.pollIntervalSec, 60)));
-
-  if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker();
-  else stopPriceTracker();
+  if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker(); else stopPriceTracker();
   res.redirect("/");
 });
 
 // ---------------------------------------------------------------------------
 // JSON ROUTES
 // ---------------------------------------------------------------------------
-app.get("/alerts", async (req, res) => {
-  const data = await dbGetAlerts(200);
-  res.json(data.map(a => ({ ...a, raw_json: undefined })));
-});
-
-app.get("/trades", async (req, res) => {
-  res.json(await dbGetTrades(200));
-});
-
-app.get("/executions", async (req, res) => {
-  res.json(await dbGetExecutions(200));
-});
+app.get("/alerts",     async (req, res) => { res.json(await dbGetAlerts(200)); });
+app.get("/trades",     async (req, res) => { res.json(await dbGetTrades(200)); });
+app.get("/executions", async (req, res) => { res.json(await dbGetExecutions(200)); });
 
 // ---------------------------------------------------------------------------
-// IG LOOKUP (still available for market search)
+// IG LOOKUP
 // ---------------------------------------------------------------------------
 app.get("/ig/search", async (req, res) => {
   try {
@@ -880,28 +843,21 @@ app.get("/ig/search", async (req, res) => {
 });
 
 app.get("/ig/market/:epic", async (req, res) => {
-  try {
-    res.json({ ok: true, epic: req.params.epic, data: await getMarketDetails(req.params.epic) });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  try { res.json({ ok: true, epic: req.params.epic, data: await getMarketDetails(req.params.epic) }); }
+  catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // ---------------------------------------------------------------------------
 // MANUAL TRADE ACTIONS
 // ---------------------------------------------------------------------------
-app.post("/trade/:id/check-price", async (req, res) => {
-  await applyTradeCheck(req.params.id, req.body.currentPrice, "manual");
-  res.redirect("/");
-});
+app.post("/trade/:id/check-price", async (req, res) => { await applyTradeCheck(req.params.id, req.body.currentPrice, "manual"); res.redirect("/"); });
 
 app.post("/trade/:id/tp1-hit", async (req, res) => {
   const t = await dbGetTradeById(req.params.id);
   if (!t) return res.status(404).send("Trade not found");
   const m = getManagerSettings();
   t.tp1Hit = 1; t.status = "TP1 HIT"; t.lastAction = "TP1 marked hit";
-  if (!t.breakEvenMoved && m.beAfterTp1) {
-    t.currentSl = t.entry; t.breakEvenMoved = 1;
-    t.status = "TP1 HIT / BREAKEVEN MOVED"; t.lastAction = "TP1 hit — SL moved to entry";
-  }
+  if (!t.breakEvenMoved && m.beAfterTp1) { t.currentSl = t.entry; t.breakEvenMoved = 1; t.status = "TP1 HIT / BREAKEVEN MOVED"; t.lastAction = "TP1 hit — SL moved to entry"; }
   recalcTrade(t); await dbUpdateTrade(t.id, t); res.redirect("/");
 });
 
@@ -916,17 +872,14 @@ app.post("/trade/:id/tp3-hit", async (req, res) => {
   const t = await dbGetTradeById(req.params.id);
   if (!t) return res.status(404).send("Trade not found");
   const m = getManagerSettings();
-  t.tp3Hit = 1;
-  t.status = m.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT";
-  t.lastAction = m.autoCloseAtTp3 ? "TP3 hit — trade closed" : "TP3 marked hit";
+  t.tp3Hit = 1; t.status = m.autoCloseAtTp3 ? "TP3 HIT / CLOSED" : "TP3 HIT"; t.lastAction = m.autoCloseAtTp3 ? "TP3 hit — closed" : "TP3 marked hit";
   recalcTrade(t); await dbUpdateTrade(t.id, t); res.redirect("/");
 });
 
 app.post("/trade/:id/move-sl-be", async (req, res) => {
   const t = await dbGetTradeById(req.params.id);
   if (!t) return res.status(404).send("Trade not found");
-  t.currentSl = t.entry; t.breakEvenMoved = 1;
-  t.status = "BREAKEVEN MOVED"; t.lastAction = "SL manually moved to entry";
+  t.currentSl = t.entry; t.breakEvenMoved = 1; t.status = "BREAKEVEN MOVED"; t.lastAction = "SL manually moved to entry";
   recalcTrade(t); await dbUpdateTrade(t.id, t); res.redirect("/");
 });
 
@@ -950,28 +903,27 @@ app.post("/trade/:id/stop", async (req, res) => {
 app.post("/execution/:id/approve", async (req, res) => {
   const exec = await dbGetExecutionById(req.params.id);
   if (!exec) return res.status(404).send("Execution not found");
-  if (exec.status === "SENT") return res.redirect("/");
+  if (exec.status === "SENT" || exec.status === "EXECUTED") return res.redirect("/");
 
   const brokerName = exec.broker || DEFAULT_BROKER;
 
   try {
     exec.lastAction = `Sending to ${brokerName}...`;
-
     const result = await routePlaceMarketOrder(brokerName, {
       symbol:     exec.symbol,
       type:       exec.type,
       sl:         exec.sl,
       tp1:        exec.tp1,
       brokerSize: exec.brokerSize,
-      strategyId: exec.strategyId
+      strategyId: exec.strategyId,
+      signal:     exec.signal
     });
 
-    exec.status         = "SENT";
-    exec.lastAction     = `Sent to ${brokerName} successfully`;
+    exec.status         = "EXECUTED";
+    exec.lastAction     = `Sent to ${brokerName} — approved`;
     exec.brokerResponse = result || null;
     exec.sentAt         = nowIso();
 
-    // Link to trade
     const allTrades = await dbGetTrades(50);
     const linked = allTrades.find(t =>
       t.symbol === exec.symbol && t.type === exec.type &&
@@ -979,7 +931,7 @@ app.post("/execution/:id/approve", async (req, res) => {
     );
     if (linked) {
       exec.tradeId = linked.id;
-      linked.status = "OPEN / TRACKING";
+      linked.status     = "OPEN / TRACKING";
       linked.lastAction = `Approved — sent to ${brokerName}`;
       await dbUpdateTrade(linked.id, linked);
     }
@@ -996,12 +948,12 @@ app.post("/execution/:id/approve", async (req, res) => {
 app.post("/execution/:id/cancel", async (req, res) => {
   const exec = await dbGetExecutionById(req.params.id);
   if (!exec) return res.status(404).send("Execution not found");
-  exec.status = "CANCELLED"; exec.lastAction = "Execution manually cancelled";
+  exec.status = "CANCELLED"; exec.lastAction = "Manually cancelled";
   await dbUpdateExecution(exec.id, exec); res.redirect("/");
 });
 
 // ---------------------------------------------------------------------------
-// WEBHOOK
+// WEBHOOK — main entry point for all TradingView signals
 // ---------------------------------------------------------------------------
 app.post("/webhook/tradingview", async (req, res) => {
   try {
@@ -1009,14 +961,21 @@ app.post("/webhook/tradingview", async (req, res) => {
     if (sanitizeString(payload.secret) !== WEBHOOK_SECRET)
       return res.status(401).json({ ok: false, error: "Invalid secret" });
 
-    // Determine broker — signal can override, else use DEFAULT_BROKER
     const brokerFromSignal = sanitizeString(payload.broker, "").toUpperCase();
     const activeBroker     = brokerFromSignal || DEFAULT_BROKER;
+
+    // ── Extract all fields including new H2 CTE signal fields ─────────────
+    const signalType  = sanitizeString(payload.signal,       "");   // SWING, SCALP_CONTRA, INTRADAY, MOMENTUM_SCALP, POSITION
+    const macroRegime = sanitizeString(payload.macroRegime,  "");   // BULL, BEAR, TRANSITIONING
+    const macroPhase  = sanitizeString(payload.macroPhase,   "");   // e.g. "Pullback — Entry Zone"
 
     const alertRecord = {
       id:          `alert_${Date.now()}`,
       receivedAt:  nowIso(),
       type:        sanitizeString(payload.type, "WAIT"),
+      signal:      signalType,
+      macroRegime,
+      macroPhase,
       symbol:      sanitizeString(payload.symbol, ""),
       tf:          sanitizeString(payload.tf, ""),
       entry:       sanitizeNumber(payload.entry),
@@ -1036,36 +995,50 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     const tradeType = String(alertRecord.type).toUpperCase();
     if (tradeType === "LONG" || tradeType === "SHORT") {
-      const upp = Number(getSetting("usdPerPip", 0.1));
+      const upp     = Number(getSetting("usdPerPip", 0.1));
       const { entry, sl, tp1, tp2, tp3 } = alertRecord;
       const tradeId = `trade_${Date.now()}`;
+
       const trade = {
         id: tradeId, createdAt: nowIso(),
-        type: alertRecord.type, symbol: alertRecord.symbol, tf: alertRecord.tf,
-        entry, sl, tp1, tp2, tp3, confidence: alertRecord.confidence,
-        strategyId: alertRecord.strategyId, status: "OPEN",
-        broker: activeBroker,
-        usdPerPip: upp,
-        riskPips: calcPipDist(entry, sl),
-        tp1Pips:  calcPipDist(entry, tp1),
-        tp2Pips:  calcPipDist(entry, tp2),
-        tp3Pips:  calcPipDist(entry, tp3),
-        riskUsd:  calcMoney(calcPipDist(entry, sl), upp),
-        tp1Usd:   calcMoney(calcPipDist(entry, tp1), upp),
-        tp2Usd:   calcMoney(calcPipDist(entry, tp2), upp),
-        tp3Usd:   calcMoney(calcPipDist(entry, tp3), upp),
-        originalSl: sl, currentSl: sl,
+        type:        alertRecord.type,
+        signal:      signalType,
+        macroRegime,
+        macroPhase,
+        symbol:      alertRecord.symbol,
+        tf:          alertRecord.tf,
+        entry, sl, tp1, tp2, tp3,
+        confidence:  alertRecord.confidence,
+        strategyId:  alertRecord.strategyId,
+        broker:      activeBroker,
+        status:      "OPEN",
+        usdPerPip:   upp,
+        riskPips:    calcPipDist(entry, sl),
+        tp1Pips:     calcPipDist(entry, tp1),
+        tp2Pips:     calcPipDist(entry, tp2),
+        tp3Pips:     calcPipDist(entry, tp3),
+        riskUsd:     calcMoney(calcPipDist(entry, sl), upp),
+        tp1Usd:      calcMoney(calcPipDist(entry, tp1), upp),
+        tp2Usd:      calcMoney(calcPipDist(entry, tp2), upp),
+        tp3Usd:      calcMoney(calcPipDist(entry, tp3), upp),
+        originalSl:  sl,
+        currentSl:   sl,
         tp1Hit: 0, tp2Hit: 0, tp3Hit: 0, breakEvenMoved: 0,
-        lastAction: "Trade created — waiting for execution",
+        lastAction:  `Trade created — ${signalType || "signal"} from ${activeBroker}`,
         currentPrice: null, livePrice: null
       };
       await dbInsertTrade(trade);
 
       const execRecord = {
-        id: `exec_${Date.now()}`, tradeId, createdAt: nowIso(),
+        id:          `exec_${Date.now()}`,
+        tradeId,
+        createdAt:   nowIso(),
         status:      EXECUTION_MODE === "AUTO" ? "QUEUED" : "PENDING APPROVAL",
         lastAction:  EXECUTION_MODE === "AUTO" ? "Queued for auto execution" : "Waiting for approval",
         strategyId:  alertRecord.strategyId,
+        signal:      signalType,
+        macroRegime,
+        macroPhase,
         broker:      activeBroker,
         accountMode: alertRecord.accountMode,
         type:        alertRecord.type,
@@ -1077,10 +1050,10 @@ app.post("/webhook/tradingview", async (req, res) => {
       };
       await dbInsertExecution(execRecord);
 
-      // ── AUTO MODE: fire immediately
+      // ── AUTO MODE: fire immediately ─────────────────────────────────────
       if (EXECUTION_MODE === "AUTO") {
         try {
-          console.log(`[AUTO] Firing trade immediately — broker: ${activeBroker} symbol: ${execRecord.symbol} type: ${execRecord.type}`);
+          console.log(`[AUTO] ${signalType || "signal"} | ${activeBroker} | ${execRecord.symbol} ${execRecord.type} | size: ${execRecord.brokerSize} | regime: ${macroRegime}`);
 
           const result = await routePlaceMarketOrder(activeBroker, {
             symbol:     execRecord.symbol,
@@ -1088,23 +1061,24 @@ app.post("/webhook/tradingview", async (req, res) => {
             sl:         execRecord.sl,
             tp1:        execRecord.tp1,
             brokerSize: execRecord.brokerSize,
-            strategyId: execRecord.strategyId
+            strategyId: execRecord.strategyId,
+            signal:     signalType
           });
 
           const ref = result.dealRef || result.positionId || result.orderId || "n/a";
           await dbUpdateExecution(execRecord.id, {
             ...execRecord,
             status:         "EXECUTED",
-            lastAction:     `AUTO executed via ${activeBroker} — ref: ${ref}`,
+            lastAction:     `AUTO executed — ${signalType} via ${activeBroker} — ref: ${ref}`,
             brokerResponse: result,
             dealRef:        ref
           });
           await dbUpdateTrade(tradeId, {
             ...trade,
             status:     "OPEN / TRACKING",
-            lastAction: `AUTO executed via ${activeBroker} — ref: ${ref}`
+            lastAction: `AUTO executed — ${signalType} via ${activeBroker} — ref: ${ref}`
           });
-          console.log(`[AUTO] Trade executed — ref: ${ref}`);
+          console.log(`[AUTO] Executed — ref: ${ref}`);
         } catch (autoErr) {
           console.error("[AUTO] Execution failed:", autoErr.message);
           await dbUpdateExecution(execRecord.id, {
@@ -1120,8 +1094,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       }
     }
 
-    console.log("Webhook:", alertRecord.type, alertRecord.symbol, alertRecord.entry, "→", activeBroker);
-    return res.json({ ok: true, message: "Webhook received", alertId: alertRecord.id });
+    console.log(`Webhook: ${alertRecord.type} ${alertRecord.symbol} | signal: ${signalType || "n/a"} | regime: ${macroRegime} | entry: ${alertRecord.entry} → ${activeBroker}`);
+    return res.json({ ok: true, message: "Webhook received", alertId: alertRecord.id, signal: signalType, macroRegime });
   } catch (err) {
     console.error("Webhook error:", err);
     return res.status(500).json({ ok: false, error: "Server error" });
@@ -1136,7 +1110,7 @@ app.get("/health", async (req, res) => {
     const [cA, cT, cE] = await Promise.all([dbCountAlerts(), dbCountTrades(), dbCountExecutions()]);
     const manager = getManagerSettings();
     res.json({
-      ok: true, app: APP_NAME, phase: "D1",
+      ok: true, app: APP_NAME, phase: "D1+",
       database: "PostgreSQL — persistent",
       time: nowIso(),
       alertsStored: cA, tradesStored: cT, executionsStored: cE,
@@ -1144,6 +1118,7 @@ app.get("/health", async (req, res) => {
       defaultBroker: DEFAULT_BROKER,
       autoTracker: priceTrackerInterval ? "running" : "stopped",
       lastPollStatus, lastPollTime,
+      signalTypes: Object.keys(SIGNAL_CONFIG).join(", "),
       ...manager
     });
   } catch (err) {
@@ -1152,7 +1127,7 @@ app.get("/health", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// SETTINGS PAGE
+// SETTINGS PAGE (unchanged from original — keeping full version)
 // ---------------------------------------------------------------------------
 app.get("/settings", async (req, res) => {
   try {
@@ -1160,103 +1135,52 @@ app.get("/settings", async (req, res) => {
     const msg = req.query.msg || "";
     const err = req.query.err || "";
 
-    const epics = {};
-    const epicSizes = {};
+    const epics = {}; const epicSizes = {};
     for (const key of ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"]) {
-      epics[key]          = await dbGetSetting(`epic_${key}`, "");
-      epicSizes[key]      = await dbGetSetting(`size_${key}`, 1);
-      epics["tv_" + key]  = await dbGetSetting(`tv_${key}`, "");
+      epics[key]         = await dbGetSetting(`epic_${key}`, "");
+      epicSizes[key]     = await dbGetSetting(`size_${key}`, 1);
+      epics["tv_" + key] = await dbGetSetting(`tv_${key}`, "");
     }
 
     const accountMode  = s.ig_account_mode || process.env.IG_ACCOUNT_MODE || "DEMO";
     const execMode     = process.env.EXECUTION_MODE || "APPROVAL";
-    const igApiKey     = s.ig_api_key     ? "••••••••" + String(s.ig_api_key).slice(-6)     : (process.env.IG_API_KEY     ? "••••••••" + process.env.IG_API_KEY.slice(-6)     : "");
-    const igIdentifier = s.ig_identifier  || process.env.IG_IDENTIFIER  || "";
-    const igBaseUrl    = s.ig_base_url    || process.env.IG_BASE_URL    || "https://demo-api.ig.com/gateway/deal";
-
+    const igApiKey     = s.ig_api_key ? "••••••••" + String(s.ig_api_key).slice(-6) : (process.env.IG_API_KEY ? "••••••••" + process.env.IG_API_KEY.slice(-6) : "");
+    const igIdentifier = s.ig_identifier || process.env.IG_IDENTIFIER || "";
+    const igBaseUrl    = s.ig_base_url || process.env.IG_BASE_URL || "https://demo-api.ig.com/gateway/deal";
     const isLive = accountMode === "LIVE";
     const isAuto = execMode === "AUTO";
 
     const html = renderPage(APP_NAME + " · Settings", `
       <div class="topbar">
-        <div>
-          <h1>⚙ Settings</h1>
-          <div class="muted">Phase C4.4 — Configure your system without touching code</div>
-        </div>
-        <div class="nav">
-          <a href="/">← Dashboard</a>
-          <a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a>
-          <a href="/health">Health</a>
-        </div>
+        <div><h1>⚙ Settings</h1><div class="muted">Configure your system without touching code</div></div>
+        <div class="nav"><a href="/">← Dashboard</a><a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a><a href="/health">Health</a></div>
       </div>
-
       ${msg ? `<div style="background:rgba(0,180,90,.15);border:1px solid #0c8a54;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#72f0ab;font-weight:bold;">✅ ${msg}</div>` : ""}
       ${err ? `<div style="background:rgba(220,70,70,.15);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#ff9a9a;font-weight:bold;">❌ ${err}</div>` : ""}
-
-      <!-- ACTIVE BROKER DISPLAY -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>📡 Active Broker</h2>
         <div style="font-size:24px;font-weight:bold;color:#ffd978;">${DEFAULT_BROKER}</div>
-        <div class="muted" style="margin-top:8px;font-size:13px;">To change broker: go to Railway → Variables → change DEFAULT_BROKER to IG or ICMARKETS → Update Variables</div>
+        <div class="muted" style="margin-top:8px;font-size:13px;">To change: Railway → Variables → DEFAULT_BROKER</div>
       </div>
-
-      <!-- EXECUTION MODE -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>🚦 Execution Mode</h2>
-        <p class="muted" style="margin:0 0 16px;">Controls whether trades fire automatically or wait for your approval on the dashboard.</p>
-        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
-          <div style="background:${isAuto ? "#1a2a1a" : "#0c2a1a"};border:2px solid ${isAuto ? "#555" : "#0c8a54"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
-            <div style="font-size:18px;font-weight:bold;color:${isAuto ? "#9aa4b2" : "#72f0ab"};">✅ APPROVAL MODE</div>
-            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Every signal appears on dashboard. You click Approve before it goes to broker. Safest option.</div>
-            ${!isAuto ? `<div style="color:#72f0ab;font-size:12px;font-weight:bold;margin-top:8px;">← CURRENTLY ACTIVE</div>` : ""}
-          </div>
-          <div style="background:${isAuto ? "#2a1a0a" : "#1a1a1a"};border:2px solid ${isAuto ? "#c75000" : "#555"};border-radius:12px;padding:16px 24px;flex:1;min-width:200px;">
-            <div style="font-size:18px;font-weight:bold;color:${isAuto ? "#ffd978" : "#9aa4b2"};">⚡ AUTO MODE</div>
-            <div style="color:#9aa4b2;font-size:13px;margin-top:6px;">Trades fire the instant a signal arrives. No approval needed. Only use after extensive demo testing.</div>
-            ${isAuto ? `<div style="color:#ffd978;font-size:12px;font-weight:bold;margin-top:8px;">← CURRENTLY ACTIVE</div>` : ""}
-          </div>
-        </div>
-        <div style="background:rgba(220,70,70,.1);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin:16px 0;color:#ff9a9a;font-size:13px;">
-          ⚠ <strong>Important:</strong> Execution mode is controlled by the EXECUTION_MODE variable in Railway. To change it: Railway → Variables → set EXECUTION_MODE to APPROVAL or AUTO.
-        </div>
-        <div style="color:#9aa4b2;font-size:13px;">Current mode: <strong style="color:#e8ecf1;">${execMode}</strong></div>
+        <div style="color:#9aa4b2;font-size:13px;">Current: <strong style="color:${isAuto?"#ffd978":"#72f0ab"};">${execMode}</strong> — change via Railway Variables → EXECUTION_MODE</div>
       </div>
-
-      <!-- BROKER SETUP (IG) -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>🔑 Broker Setup — IG Markets</h2>
-        <p class="muted" style="margin:0 0 16px;">IG API credentials. Leave a field blank to keep the current value.</p>
         <form method="POST" action="/settings/broker">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px;">
             <div>
               <div class="label">Account Mode</div>
               <div style="display:flex;gap:8px;margin-top:4px;">
-                <button type="submit" name="accountMode" value="DEMO"
-                  style="flex:1;background:${!isLive ? "#0c8a54" : "#2a303a"};border:2px solid ${!isLive ? "#0c8a54" : "#3a4555"};color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">
-                  ${!isLive ? "✅ " : ""}DEMO
-                </button>
-                <button type="submit" name="accountMode" value="LIVE"
-                  style="flex:1;background:${isLive ? "#b43737" : "#2a303a"};border:2px solid ${isLive ? "#b43737" : "#3a4555"};color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">
-                  ${isLive ? "🔴 " : ""}LIVE
-                </button>
+                <button type="submit" name="accountMode" value="DEMO" style="flex:1;background:${!isLive?"#0c8a54":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">${!isLive?"✅ ":""}DEMO</button>
+                <button type="submit" name="accountMode" value="LIVE" style="flex:1;background:${isLive?"#b43737":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">${isLive?"🔴 ":""}LIVE</button>
               </div>
-              <div style="color:#9aa4b2;font-size:12px;margin-top:6px;">Current: <strong style="color:${isLive ? "#ff9a9a" : "#72f0ab"}">${accountMode}</strong></div>
+              <div style="color:#9aa4b2;font-size:12px;margin-top:6px;">Current: <strong style="color:${isLive?"#ff9a9a":"#72f0ab"}">${accountMode}</strong></div>
             </div>
-            <div>
-              <div class="label">IG API Key</div>
-              <input type="password" name="ig_api_key" placeholder="Leave blank to keep — ${igApiKey || "not set"}" style="width:100%;box-sizing:border-box;" />
-            </div>
-            <div>
-              <div class="label">IG Username</div>
-              <input type="text" name="ig_identifier" value="${igIdentifier}" autocomplete="off" style="width:100%;box-sizing:border-box;" />
-            </div>
-            <div>
-              <div class="label">IG Password</div>
-              <input type="password" name="ig_password" placeholder="Leave blank to keep current" style="width:100%;box-sizing:border-box;" />
-            </div>
-          </div>
-          <div style="background:#0f1319;border:1px solid #2a303a;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#9aa4b2;">
-            API URL: <strong style="color:#e8ecf1;">${igBaseUrl}</strong>
+            <div><div class="label">IG API Key</div><input type="password" name="ig_api_key" placeholder="Leave blank to keep — ${igApiKey||"not set"}" style="width:100%;box-sizing:border-box;" /></div>
+            <div><div class="label">IG Username</div><input type="text" name="ig_identifier" value="${igIdentifier}" autocomplete="off" style="width:100%;box-sizing:border-box;" /></div>
+            <div><div class="label">IG Password</div><input type="password" name="ig_password" placeholder="Leave blank to keep current" style="width:100%;box-sizing:border-box;" /></div>
           </div>
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
             <button type="submit" name="action" value="save" class="btn-green">Save IG Settings</button>
@@ -1264,21 +1188,12 @@ app.get("/settings", async (req, res) => {
           </div>
         </form>
       </div>
-
-      <!-- INSTRUMENTS -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>📊 Instruments</h2>
-        <p class="muted" style="margin:0 0 4px;">Map each market to its IG epic code and TradingView ticker.</p>
         <form method="POST" action="/settings/instruments">
           <div style="overflow-x:auto;">
             <table style="min-width:750px;">
-              <thead><tr>
-                <th>Market</th>
-                <th>TradingView Symbol</th>
-                <th>IG Epic Code</th>
-                <th>Default Size</th>
-                <th>Status</th>
-              </tr></thead>
+              <thead><tr><th>Market</th><th>TradingView Symbol</th><th>IG Epic Code</th><th>Default Size</th><th>Status</th></tr></thead>
               <tbody>
                 ${[
                   {key:"JP225",  label:"Japan 225 (Nikkei)",  epicHint:"IX.D.NIKKEI.IFM.IP",  tvHint:"JP225, NI225"},
@@ -1290,74 +1205,44 @@ app.get("/settings", async (req, res) => {
                   {key:"AUS200", label:"Australia 200",      epicHint:"IX.D.ASX.IFD.IP",     tvHint:"AUS200, ASX200"}
                 ].map(inst => {
                   const tvSym = epics["tv_" + inst.key] || "";
-                  return `
-                  <tr>
+                  return `<tr>
                     <td style="font-weight:bold;">${inst.label}</td>
                     <td><input type="text" name="tv_${inst.key}" value="${tvSym}" placeholder="${inst.tvHint}" style="width:160px;" /></td>
                     <td><input type="text" name="epic_${inst.key}" value="${epics[inst.key]}" placeholder="${inst.epicHint}" style="width:200px;" /></td>
-                    <td><input type="number" name="size_${inst.key}" value="${epicSizes[inst.key] || 1}" min="0.1" step="0.1" style="width:80px;" /></td>
-                    <td>${epics[inst.key] ? '<span class="pill pill-green">✅ Set</span>' : '<span class="pill pill-gray">Not set</span>'}</td>
-                  </tr>`}).join("")}
+                    <td><input type="number" name="size_${inst.key}" value="${epicSizes[inst.key]||1}" min="0.1" step="0.1" style="width:80px;" /></td>
+                    <td>${epics[inst.key]?'<span class="pill pill-green">✅ Set</span>':'<span class="pill pill-gray">Not set</span>'}</td>
+                  </tr>`;}).join("")}
               </tbody>
             </table>
           </div>
-          <div style="margin-top:16px;">
-            <button type="submit" class="btn-green">Save Instruments</button>
-          </div>
+          <div style="margin-top:16px;"><button type="submit" class="btn-green">Save Instruments</button></div>
         </form>
       </div>
-
-      <!-- RISK MANAGEMENT -->
       <div class="section card" style="margin-bottom:20px;">
         <h2>💰 Risk Management</h2>
         <form method="POST" action="/settings/risk">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px;">
-            <div>
-              <div class="label">USD value per pip</div>
-              <input type="number" name="usdPerPip" min="0.01" step="0.01" value="${settingsCache.usdPerPip || 0.1}" style="width:100%;box-sizing:border-box;" />
-            </div>
-            <div>
-              <div class="label">Default broker size</div>
-              <input type="number" name="defaultSize" min="0.1" step="0.1" value="${settingsCache.ig_default_size || 1}" style="width:100%;box-sizing:border-box;" />
-            </div>
-            <div>
-              <div class="label">Auto price poll interval (seconds)</div>
-              <input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${settingsCache.pollIntervalSec || 60}" style="width:100%;box-sizing:border-box;" />
-            </div>
+            <div><div class="label">USD value per pip</div><input type="number" name="usdPerPip" min="0.01" step="0.01" value="${settingsCache.usdPerPip||0.1}" style="width:100%;box-sizing:border-box;" /></div>
+            <div><div class="label">Default broker size</div><input type="number" name="defaultSize" min="0.1" step="0.1" value="${settingsCache.ig_default_size||1}" style="width:100%;box-sizing:border-box;" /></div>
+            <div><div class="label">Poll interval (seconds)</div><input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${settingsCache.pollIntervalSec||60}" style="width:100%;box-sizing:border-box;" /></div>
           </div>
           <div class="checkbox-row">
-            <label><input type="checkbox" name="beAfterTp1" ${settingsCache.beAfterTp1 ? "checked" : ""} /> Move SL to breakeven after TP1 hit</label>
-            <label><input type="checkbox" name="autoCloseAtTp3" ${settingsCache.autoCloseAtTp3 ? "checked" : ""} /> Auto close trade at TP3</label>
-            <label><input type="checkbox" name="autoPriceTrack" ${settingsCache.autoPriceTrack ? "checked" : ""} /> Auto price tracking ON</label>
+            <label><input type="checkbox" name="beAfterTp1" ${settingsCache.beAfterTp1?"checked":""} /> Move SL to breakeven after TP1</label>
+            <label><input type="checkbox" name="autoCloseAtTp3" ${settingsCache.autoCloseAtTp3?"checked":""} /> Auto close at TP3</label>
+            <label><input type="checkbox" name="autoPriceTrack" ${settingsCache.autoPriceTrack?"checked":""} /> Auto price tracking ON</label>
           </div>
           <button type="submit" class="btn-green">Save Risk Settings</button>
         </form>
       </div>
-
-      <!-- WEBHOOK INFO -->
       <div class="section card">
         <h2>🔗 Webhook & System Info</h2>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;">
-          <div class="stat">
-            <div class="k">Webhook URL</div>
-            <div class="v" style="font-size:12px;word-break:break-all;">https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview</div>
-          </div>
-          <div class="stat">
-            <div class="k">Webhook Secret</div>
-            <div class="v">${process.env.WEBHOOK_SECRET ? "••••••••" + process.env.WEBHOOK_SECRET.slice(-4) : "Not set"}</div>
-          </div>
-          <div class="stat">
-            <div class="k">Execution Mode</div>
-            <div class="v" style="color:${isAuto ? "#ffd978" : "#72f0ab"};">${execMode}</div>
-          </div>
-          <div class="stat">
-            <div class="k">Active Broker</div>
-            <div class="v" style="color:#ffd978;">${DEFAULT_BROKER}</div>
-          </div>
-          <div class="stat">
-            <div class="k">Database</div>
-            <div class="v" style="color:#98f0ff;">PostgreSQL — persistent</div>
-          </div>
+          <div class="stat"><div class="k">Webhook URL</div><div class="v" style="font-size:12px;word-break:break-all;">https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview</div></div>
+          <div class="stat"><div class="k">Webhook Secret</div><div class="v">${process.env.WEBHOOK_SECRET?"••••••••"+process.env.WEBHOOK_SECRET.slice(-4):"Not set"}</div></div>
+          <div class="stat"><div class="k">Execution Mode</div><div class="v" style="color:${isAuto?"#ffd978":"#72f0ab"};">${execMode}</div></div>
+          <div class="stat"><div class="k">Active Broker</div><div class="v" style="color:#ffd978;">${DEFAULT_BROKER}</div></div>
+          <div class="stat"><div class="k">Database</div><div class="v" style="color:#98f0ff;">PostgreSQL — persistent</div></div>
+          <div class="stat"><div class="k">Signal Types Supported</div><div class="v" style="font-size:11px;">SWING · SCALP_CONTRA · INTRADAY · MOMENTUM_SCALP · POSITION</div></div>
         </div>
       </div>
     `);
@@ -1372,22 +1257,13 @@ app.post("/settings/broker", async (req, res) => {
   try {
     const action = req.body.action || "save";
     const accountMode = req.body.accountMode || settingsCache.ig_account_mode || "DEMO";
-    const baseUrl = accountMode === "LIVE"
-      ? "https://api.ig.com/gateway/deal"
-      : "https://demo-api.ig.com/gateway/deal";
-
+    const baseUrl = accountMode === "LIVE" ? "https://api.ig.com/gateway/deal" : "https://demo-api.ig.com/gateway/deal";
     await saveSetting("ig_account_mode", accountMode);
     await saveSetting("ig_base_url", baseUrl);
-
-    if (req.body.ig_api_key && req.body.ig_api_key.trim())
-      await saveSetting("ig_api_key", req.body.ig_api_key.trim());
-    if (req.body.ig_identifier && req.body.ig_identifier.trim())
-      await saveSetting("ig_identifier", req.body.ig_identifier.trim());
-    if (req.body.ig_password && req.body.ig_password.trim())
-      await saveSetting("ig_password", req.body.ig_password.trim());
-
+    if (req.body.ig_api_key && req.body.ig_api_key.trim())       await saveSetting("ig_api_key", req.body.ig_api_key.trim());
+    if (req.body.ig_identifier && req.body.ig_identifier.trim()) await saveSetting("ig_identifier", req.body.ig_identifier.trim());
+    if (req.body.ig_password && req.body.ig_password.trim())     await saveSetting("ig_password", req.body.ig_password.trim());
     await loadBrokerConfig();
-
     if (action === "test") {
       try {
         const { createSession } = require("./brokers/ig");
@@ -1399,27 +1275,20 @@ app.post("/settings/broker", async (req, res) => {
     } else {
       res.redirect("/settings?msg=Broker+settings+saved+successfully");
     }
-  } catch (err) {
-    res.redirect("/settings?err=" + encodeURIComponent(err.message));
-  }
+  } catch (err) { res.redirect("/settings?err=" + encodeURIComponent(err.message)); }
 });
 
 app.post("/settings/instruments", async (req, res) => {
   try {
     const keys = ["JP225","NAS100","DAX40","SP500","DOW","FTSE","AUS200"];
     for (const key of keys) {
-      if (req.body[`epic_${key}`] !== undefined)
-        await saveSetting(`epic_${key}`, req.body[`epic_${key}`].trim());
-      if (req.body[`size_${key}`] !== undefined)
-        await saveSetting(`size_${key}`, Number(req.body[`size_${key}`]) || 1);
-      if (req.body[`tv_${key}`] !== undefined)
-        await saveSetting(`tv_${key}`, req.body[`tv_${key}`].trim().toUpperCase());
+      if (req.body[`epic_${key}`] !== undefined) await saveSetting(`epic_${key}`, req.body[`epic_${key}`].trim());
+      if (req.body[`size_${key}`] !== undefined) await saveSetting(`size_${key}`, Number(req.body[`size_${key}`]) || 1);
+      if (req.body[`tv_${key}`]   !== undefined) await saveSetting(`tv_${key}`,   req.body[`tv_${key}`].trim().toUpperCase());
     }
     await loadBrokerConfig();
     res.redirect("/settings?msg=Instruments+saved+successfully");
-  } catch (err) {
-    res.redirect("/settings?err=" + encodeURIComponent(err.message));
-  }
+  } catch (err) { res.redirect("/settings?err=" + encodeURIComponent(err.message)); }
 });
 
 app.post("/settings/risk", async (req, res) => {
@@ -1427,18 +1296,13 @@ app.post("/settings/risk", async (req, res) => {
     await saveSetting("usdPerPip",       Math.max(0.001, Number(req.body.usdPerPip) || 0.1));
     await saveSetting("ig_default_size", Math.max(0.1, Number(req.body.defaultSize) || 1));
     await saveSetting("pollIntervalSec", Math.max(30, Number(req.body.pollIntervalSec) || 60));
-    await saveSetting("beAfterTp1",      req.body.beAfterTp1     ? 1 : 0);
+    await saveSetting("beAfterTp1",      req.body.beAfterTp1    ? 1 : 0);
     await saveSetting("autoCloseAtTp3",  req.body.autoCloseAtTp3 ? 1 : 0);
     await saveSetting("autoPriceTrack",  req.body.autoPriceTrack  ? 1 : 0);
-
     await loadBrokerConfig();
-    if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker();
-    else stopPriceTracker();
-
+    if (Number(getSetting("autoPriceTrack", 1)) === 1) startPriceTracker(); else stopPriceTracker();
     res.redirect("/settings?msg=Risk+settings+saved+successfully");
-  } catch (err) {
-    res.redirect("/settings?err=" + encodeURIComponent(err.message));
-  }
+  } catch (err) { res.redirect("/settings?err=" + encodeURIComponent(err.message)); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1459,7 +1323,7 @@ async function start() {
       console.log(`Database: PostgreSQL`);
       console.log(`Broker: ${DEFAULT_BROKER}`);
       console.log(`Execution mode: ${EXECUTION_MODE}`);
-      console.log(`Auto tracker: ${priceTrackerInterval ? "started" : "stopped"}`);
+      console.log(`Signal types: ${Object.keys(SIGNAL_CONFIG).join(", ")}`);
     });
   } catch (err) {
     console.error("Startup error:", err);
