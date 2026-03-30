@@ -717,6 +717,7 @@ app.get("/", async (req, res) => {
           <a href="/alerts">Alerts JSON</a>
           <a href="/trades">Trades JSON</a>
           <a href="/executions">Executions JSON</a>
+          <a href="/performance" style="color:#98f0ff;">📊 Performance</a>
           <a href="/health">Health</a>
         </div>
       </div>
@@ -1304,6 +1305,258 @@ app.post("/settings/risk", async (req, res) => {
     res.redirect("/settings?msg=Risk+settings+saved+successfully");
   } catch (err) { res.redirect("/settings?err=" + encodeURIComponent(err.message)); }
 });
+
+// ---------------------------------------------------------------------------
+// PERFORMANCE PAGE
+// Shows per-indicator, per-signal-type profitability with date range filter
+// ---------------------------------------------------------------------------
+app.get("/performance", async (req, res) => {
+  try {
+    const fromDate = req.query.from || "";
+    const toDate   = req.query.to   || "";
+
+    // Build date filter for PostgreSQL
+    let dateFilter = "";
+    const params = [];
+    if (fromDate) { params.push(fromDate + "T00:00:00Z"); dateFilter += ` AND created_at >= $${params.length}`; }
+    if (toDate)   { params.push(toDate   + "T23:59:59Z"); dateFilter += ` AND created_at <= $${params.length}`; }
+
+    // Pull all trades in range
+    const result = await db.query(
+      `SELECT data FROM trades WHERE 1=1 ${dateFilter} ORDER BY created_at ASC`,
+      params
+    );
+    const trades = result.rows.map(r => r.data);
+
+    // ── Compute stats ──────────────────────────────────────────────────────
+    // Group by strategyId → signal
+    const groups = {};
+    for (const t of trades) {
+      const sid = t.strategyId || "UNKNOWN";
+      const sig = t.signal     || "—";
+      const key = sid + "|||" + sig;
+      if (!groups[key]) {
+        groups[key] = {
+          strategyId: sid, signal: sig,
+          total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0,
+          rTotal: 0
+        };
+      }
+      const g = groups[key];
+      g.total++;
+      const status = String(t.status || "").toUpperCase();
+      if (status.includes("TP3"))     { g.tp3++; g.tp2++; g.tp1++; g.rTotal += 3; }
+      else if (status.includes("TP2")) { g.tp2++; g.tp1++; g.rTotal += 2; }
+      else if (status.includes("TP1")) { g.tp1++; g.rTotal += 1; }
+      else if (status.includes("STOP")) { g.stopped++; g.rTotal -= 1; }
+      else { g.open++; }
+    }
+
+    // Sort: by strategyId then signal
+    const rows = Object.values(groups).sort((a, b) =>
+      a.strategyId.localeCompare(b.strategyId) || a.signal.localeCompare(b.signal)
+    );
+
+    // Group by strategyId for summary
+    const summary = {};
+    for (const g of rows) {
+      if (!summary[g.strategyId]) {
+        summary[g.strategyId] = { total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0, rTotal: 0 };
+      }
+      const s = summary[g.strategyId];
+      s.total   += g.total;
+      s.tp1     += g.tp1;
+      s.tp2     += g.tp2;
+      s.tp3     += g.tp3;
+      s.stopped += g.stopped;
+      s.open    += g.open;
+      s.rTotal  += g.rTotal;
+    }
+
+    // ── HTML helpers ────────────────────────────────────────────────────────
+    function pct(n, d) {
+      if (!d) return "—";
+      return (n / d * 100).toFixed(0) + "%";
+    }
+    function rColor(r) {
+      if (r > 0) return "color:#72f0ab;font-weight:bold;";
+      if (r < 0) return "color:#ff9a9a;font-weight:bold;";
+      return "color:#9aa4b2;";
+    }
+    function winRate(g) {
+      const closed = g.total - g.open;
+      if (!closed) return "—";
+      return (g.tp1 / closed * 100).toFixed(0) + "%";
+    }
+    function signalBadge(sig) {
+      const colors = {
+        SWING: "#72f0ab", SCALP_CONTRA: "#ffd978", INTRADAY: "#9fc2ff",
+        MOMENTUM_SCALP: "#c8a8f8", POSITION: "#98f0ff",
+        STRONG_LONG: "#72f0ab", STRONG_SHORT: "#ff9a9a",
+        APLUS_LONG: "#72f0ab", APLUS_SHORT: "#ff9a9a"
+      };
+      const c = colors[sig] || "#d3d7de";
+      return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:bold;background:rgba(255,255,255,.08);color:${c};">${sig}</span>`;
+    }
+
+    // ── Summary cards ───────────────────────────────────────────────────────
+    const totalTrades  = trades.length;
+    const totalTP1     = trades.filter(t => String(t.status||"").toUpperCase().includes("TP1")).length;
+    const totalStopped = trades.filter(t => String(t.status||"").toUpperCase().includes("STOP")).length;
+    const totalOpen    = trades.filter(t => !["TP1","TP2","TP3","STOP","CLOSE"].some(x => String(t.status||"").toUpperCase().includes(x))).length;
+    const closedTrades = totalTrades - totalOpen;
+    const overallWR    = closedTrades ? (totalTP1 / closedTrades * 100).toFixed(1) : "—";
+    const totalR       = Object.values(summary).reduce((a, s) => a + s.rTotal, 0);
+
+    // ── Summary table per indicator ─────────────────────────────────────────
+    const summaryRows = Object.entries(summary).map(([sid, s]) => `
+      <tr>
+        <td style="font-weight:bold;color:#ffd978;">${sid}</td>
+        <td>${s.total}</td>
+        <td>${s.total - s.open}</td>
+        <td style="${rColor(s.rTotal)}">${s.rTotal > 0 ? "+" : ""}${s.rTotal.toFixed(1)}R</td>
+        <td>${winRate(s)}</td>
+        <td>${pct(s.tp1, s.total - s.open)}</td>
+        <td>${pct(s.tp2, s.total - s.open)}</td>
+        <td>${pct(s.tp3, s.total - s.open)}</td>
+        <td style="color:#ff9a9a;">${pct(s.stopped, s.total - s.open)}</td>
+        <td style="color:#9aa4b2;">${s.open}</td>
+      </tr>`).join("");
+
+    // ── Detailed breakdown rows ─────────────────────────────────────────────
+    let lastSid = "";
+    const detailRows = rows.map(g => {
+      const closed = g.total - g.open;
+      const isNew  = g.strategyId !== lastSid;
+      lastSid = g.strategyId;
+      return `
+        <tr ${isNew ? 'style="border-top:2px solid #3a4555;"' : ""}>
+          <td style="color:#9aa4b2;font-size:12px;">${isNew ? g.strategyId : ""}</td>
+          <td>${signalBadge(g.signal)}</td>
+          <td>${g.total}</td>
+          <td>${closed}</td>
+          <td style="${rColor(g.rTotal)}">${g.rTotal > 0 ? "+" : ""}${g.rTotal.toFixed(1)}R</td>
+          <td>${winRate(g)}</td>
+          <td>${pct(g.tp1, closed)}</td>
+          <td>${pct(g.tp2, closed)}</td>
+          <td>${pct(g.tp3, closed)}</td>
+          <td style="color:#ff9a9a;">${pct(g.stopped, closed)}</td>
+          <td style="color:#9aa4b2;">${g.open}</td>
+        </tr>`;
+    }).join("");
+
+    // ── Recent trades table ─────────────────────────────────────────────────
+    const recentRows = [...trades].reverse().slice(0, 50).map(t => {
+      const status = String(t.status || "").toUpperCase();
+      const sColor = status.includes("TP3") ? "#72f0ab" : status.includes("TP2") ? "#72f0ab"
+        : status.includes("TP1") ? "#9fc2ff" : status.includes("STOP") ? "#ff9a9a" : "#9aa4b2";
+      return `
+        <tr>
+          <td style="font-size:11px;color:#9aa4b2;">${(t.createdAt||"").substring(0,16).replace("T"," ")}</td>
+          <td style="color:#ffd978;font-size:12px;">${t.strategyId||"—"}</td>
+          <td>${signalBadge(t.signal||"—")}</td>
+          <td>${typePill(t.type)}</td>
+          <td>${t.symbol||"—"}</td>
+          <td>${formatNumber(t.entry,0)}</td>
+          <td>${formatNumber(t.sl,0)}</td>
+          <td>${formatNumber(t.tp1,0)}</td>
+          <td>${formatNumber(t.tp2,0)}</td>
+          <td style="color:${sColor};font-weight:bold;">${t.status||"—"}</td>
+          <td style="font-size:11px;color:#9aa4b2;">${t.macroRegime||"—"}</td>
+        </tr>`;
+    }).join("");
+
+    const html = renderPage(APP_NAME + " · Performance", `
+      <div class="topbar">
+        <div>
+          <h1>📊 Signal Performance</h1>
+          <div class="muted">Per-indicator and per-signal-type profitability</div>
+        </div>
+        <div class="nav">
+          <a href="/">← Dashboard</a>
+          <a href="/performance" style="color:#ffd978;font-weight:bold;">📊 Performance</a>
+          <a href="/settings">⚙ Settings</a>
+          <a href="/health">Health</a>
+        </div>
+      </div>
+
+      <!-- DATE FILTER -->
+      <div class="card" style="margin-bottom:20px;">
+        <h2 style="margin-bottom:12px;">Date Range Filter</h2>
+        <form method="GET" action="/performance" style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
+          <div>
+            <div class="label">From date</div>
+            <input type="date" name="from" value="${fromDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" />
+          </div>
+          <div>
+            <div class="label">To date</div>
+            <input type="date" name="to" value="${toDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" />
+          </div>
+          <button type="submit" class="btn-green">Apply Filter</button>
+          <a href="/performance"><button type="button" class="btn-gray">Clear Filter</button></a>
+        </form>
+        <div style="margin-top:10px;color:#9aa4b2;font-size:13px;">
+          ${fromDate || toDate ? `Showing: ${fromDate || "all time"} → ${toDate || "now"}` : "Showing: all time"}
+          · ${totalTrades} trade${totalTrades !== 1 ? "s" : ""} found
+        </div>
+      </div>
+
+      <!-- SUMMARY STATS -->
+      <div class="grid" style="margin-bottom:20px;">
+        <div class="card"><div class="label">Total Trades</div><div class="big">${totalTrades}</div></div>
+        <div class="card"><div class="label">Closed Trades</div><div class="big">${closedTrades}</div></div>
+        <div class="card"><div class="label">Overall Win Rate (TP1+)</div><div class="big" style="color:${Number(overallWR) >= 50 ? "#72f0ab" : "#ff9a9a"};">${overallWR}%</div></div>
+        <div class="card"><div class="label">Total R</div><div class="big" style="${rColor(totalR)}">${totalR > 0 ? "+" : ""}${totalR.toFixed(1)}R</div></div>
+        <div class="card"><div class="label">Stopped Out</div><div class="big" style="color:#ff9a9a;">${totalStopped}</div></div>
+        <div class="card"><div class="label">Still Open</div><div class="big" style="color:#9aa4b2;">${totalOpen}</div></div>
+      </div>
+
+      <!-- PER INDICATOR SUMMARY -->
+      <div class="section">
+        <h2>By Indicator</h2>
+        <table>
+          <thead><tr>
+            <th>Indicator</th><th>Total</th><th>Closed</th><th>Total R</th>
+            <th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th>
+          </tr></thead>
+          <tbody>${summaryRows || `<tr><td colspan="10" style="color:#9aa4b2;">No closed trades in this period</td></tr>`}</tbody>
+        </table>
+      </div>
+
+      <!-- DETAILED BREAKDOWN BY INDICATOR + SIGNAL -->
+      <div class="section">
+        <h2>By Indicator & Signal Type</h2>
+        <table>
+          <thead><tr>
+            <th>Indicator</th><th>Signal Type</th><th>Total</th><th>Closed</th><th>Total R</th>
+            <th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th>
+          </tr></thead>
+          <tbody>${detailRows || `<tr><td colspan="11" style="color:#9aa4b2;">No trades in this period</td></tr>`}</tbody>
+        </table>
+      </div>
+
+      <!-- RECENT TRADE LOG -->
+      <div class="section">
+        <h2>Recent Trade Log (last 50)</h2>
+        <div style="overflow-x:auto;">
+          <table style="min-width:1000px;">
+            <thead><tr>
+              <th>Date</th><th>Indicator</th><th>Signal</th><th>Dir</th><th>Symbol</th>
+              <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Result</th><th>Regime</th>
+            </tr></thead>
+            <tbody>${recentRows || `<tr><td colspan="11" style="color:#9aa4b2;">No trades in this period</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `);
+
+    res.send(html);
+  } catch (err) {
+    console.error("Performance page error:", err);
+    res.status(500).send("Performance error: " + err.message);
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // STARTUP
