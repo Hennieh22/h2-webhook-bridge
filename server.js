@@ -31,25 +31,21 @@ const DEFAULT_BROKER = process.env.DEFAULT_BROKER || "IG";
 
 // ---------------------------------------------------------------------------
 // SIGNAL TYPE CONFIG
+// Maps each signal type to its display label, colour, and size multiplier
 // ---------------------------------------------------------------------------
 const SIGNAL_CONFIG = {
-  // ── Original H2 signal types ──────────────────────────────────────────
   SCALP_CONTRA:   { label: "Scalp Contra",   color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  },
   SWING:          { label: "Swing",          color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
   INTRADAY:       { label: "Intraday",       color: "#9fc2ff", bg: "rgba(70,120,220,.20)",  sizeMulti: 0.75 },
   MOMENTUM_SCALP: { label: "Mo. Scalp",      color: "#c8a8f8", bg: "rgba(140,60,220,.20)",  sizeMulti: 0.5  },
   POSITION:       { label: "Position",       color: "#98f0ff", bg: "rgba(60,190,210,.20)",  sizeMulti: 1.0  },
+  // Legacy signals from other indicators
   STRONG_LONG:    { label: "Strong Long",    color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
   STRONG_SHORT:   { label: "Strong Short",   color: "#ff9a9a", bg: "rgba(220,70,70,.20)",   sizeMulti: 1.0  },
   APLUS_LONG:     { label: "A+ Long",        color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
   APLUS_SHORT:    { label: "A+ Short",       color: "#ff9a9a", bg: "rgba(220,70,70,.20)",   sizeMulti: 1.0  },
   SCENARIO_BOUNCE:    { label: "Bounce",     color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  },
-  SCENARIO_REJECTION: { label: "Rejection",  color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  },
-  // ── LSM Bot Edition signal types ─────────────────────────────────────
-  BOS_UP:         { label: "LSM Up",         color: "#72f0ab", bg: "rgba(0,180,90,.20)",    sizeMulti: 1.0  },
-  BOS_DN:         { label: "LSM Down",       color: "#ff9a9a", bg: "rgba(220,70,70,.20)",   sizeMulti: 1.0  },
-  RAID_LONG:      { label: "LSM Raid Long",  color: "#72f0ab", bg: "rgba(0,180,90,.15)",    sizeMulti: 0.75 },
-  RAID_SHORT:     { label: "LSM Raid Short", color: "#ff9a9a", bg: "rgba(220,70,70,.15)",   sizeMulti: 0.75 }
+  SCENARIO_REJECTION: { label: "Rejection",  color: "#ffd978", bg: "rgba(220,180,70,.20)",  sizeMulti: 0.5  }
 };
 
 function signalPill(signalType) {
@@ -61,8 +57,8 @@ function signalPill(signalType) {
 
 function regimePill(regime) {
   const r = String(regime || "").toUpperCase();
-  if (r === "BULL")          return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(0,180,90,.20);color:#72f0ab;">▲ ${r}</span>`;
-  if (r === "BEAR")          return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(220,70,70,.20);color:#ff9a9a;">▼ ${r}</span>`;
+  if (r === "BULL")         return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(0,180,90,.20);color:#72f0ab;">▲ ${r}</span>`;
+  if (r === "BEAR")         return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(220,70,70,.20);color:#ff9a9a;">▼ ${r}</span>`;
   if (r === "TRANSITIONING") return `<span style="display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:bold;background:rgba(220,180,70,.15);color:#ffd978;">↔ TRANS</span>`;
   return "";
 }
@@ -651,7 +647,7 @@ app.get("/", async (req, res) => {
         </div>
         ${e.status === "PENDING APPROVAL" ? `
           <div class="btn-row">
-            <form method="POST" action="/execution/${e.id}/approve"><button class="btn-green" type="submit">Approve Trade</button></form>
+            <form method="POST" action="/execution/${e.id}/approve"><button class="btn-green" type="submit">✅ Approve Trade</button></form>
             <form method="POST" action="/execution/${e.id}/cancel"><button class="btn-red" type="submit">Cancel</button></form>
           </div>` : ""}
       </div>`).join("");
@@ -676,7 +672,7 @@ app.get("/", async (req, res) => {
           </div>` : ""}
         ${hasLive ? `
           <div class="live-price">
-            <div class="lp-label">LIVE PRICE</div>
+            <div class="lp-label">🔴 LIVE PRICE</div>
             <div class="lp-value">${formatNumber(t.livePrice, 2)}</div>
             <div class="lp-meta">Bid: ${formatNumber(t.liveBid, 2)} · Offer: ${formatNumber(t.liveOffer, 2)} · ${t.lastCheckedAt || "-"}</div>
           </div>` : ""}
@@ -687,8 +683,8 @@ app.get("/", async (req, res) => {
           <div class="stat"><div class="k">TP2</div><div class="v">${formatNumber(t.tp2, 2)}</div></div>
           <div class="stat"><div class="k">TP3</div><div class="v">${formatNumber(t.tp3, 2)}</div></div>
           <div class="stat"><div class="k">Risk USD</div><div class="v">$${formatNumber(t.riskUsd, 2)}</div></div>
-          <div class="stat"><div class="k">Break-even</div><div class="v">${t.breakEvenMoved ? "Moved" : "Not moved"}</div></div>
-          <div class="stat"><div class="k">TP Hits</div><div class="v">TP1:${t.tp1Hit ? "Y" : "-"} TP2:${t.tp2Hit ? "Y" : "-"} TP3:${t.tp3Hit ? "Y" : "-"}</div></div>
+          <div class="stat"><div class="k">Break-even</div><div class="v">${t.breakEvenMoved ? "✅ Moved" : "Not moved"}</div></div>
+          <div class="stat"><div class="k">TP Hits</div><div class="v">TP1:${t.tp1Hit ? "✅" : "—"} TP2:${t.tp2Hit ? "✅" : "—"} TP3:${t.tp3Hit ? "✅" : "—"}</div></div>
           <div class="stat" style="grid-column:span 2"><div class="k">Last Action</div><div class="v">${t.lastAction || "-"}</div></div>
         </div>
         <div class="section card" style="margin-bottom:14px;">
@@ -712,22 +708,22 @@ app.get("/", async (req, res) => {
     const html = renderPage(APP_NAME, `
       <div class="topbar">
         <div>
-          <h1>${APP_NAME} <span class="db-badge">PostgreSQL</span> <span class="broker-badge">${DEFAULT_BROKER}</span></h1>
+          <h1>${APP_NAME} <span class="db-badge">💾 PostgreSQL</span> <span class="broker-badge">📡 ${DEFAULT_BROKER}</span></h1>
           <div class="muted">Phase D1 · Persistent Database + Auto Price Tracking + Multi-Style Signals</div>
         </div>
         <div class="nav">
           <a href="/">Dashboard</a>
-          <a href="/settings" style="color:#ffd978;font-weight:bold;">Settings</a>
+          <a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a>
           <a href="/alerts">Alerts JSON</a>
           <a href="/trades">Trades JSON</a>
           <a href="/executions">Executions JSON</a>
-          <a href="/performance" style="color:#98f0ff;">Performance</a>
+          <a href="/performance" style="color:#98f0ff;">📊 Performance</a>
           <a href="/health">Health</a>
         </div>
       </div>
 
       <div class="tracker-bar">
-        <div><span class="label">Auto Tracker: </span><span class="${trackerRunning ? "tracker-on" : "tracker-off"}">${trackerRunning ? "RUNNING" : "STOPPED"}</span></div>
+        <div><span class="label">Auto Tracker: </span><span class="${trackerRunning ? "tracker-on" : "tracker-off"}">${trackerRunning ? "🟢 RUNNING" : "🔴 STOPPED"}</span></div>
         <div class="muted" style="font-size:13px;">${lastPollStatus}</div>
         <div style="margin-left:auto;display:flex;gap:8px;">
           <form method="POST" action="/tracker/poll-now"><button type="submit" class="btn-cyan">Poll Now</button></form>
@@ -766,7 +762,7 @@ app.get("/", async (req, res) => {
           <div style="display:flex;gap:10px;flex-wrap:wrap;">
             <div><div class="label">TP1 partial %</div><input type="number" name="tp1PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp1PartialPct, 0)}" /></div>
             <div><div class="label">TP2 partial %</div><input type="number" name="tp2PartialPct" min="0" max="100" step="1" value="${formatNumber(manager.tp2PartialPct, 0)}" /></div>
-            <div><div class="label">Poll interval (sec)</div><input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${manager.pollIntervalSec}" /></div>
+            <div><div class="label">Poll interval (sec, min 30)</div><input type="number" name="pollIntervalSec" min="30" max="300" step="10" value="${manager.pollIntervalSec}" /></div>
           </div>
           <div style="margin-top:12px;"><button type="submit">Update Rules</button></div>
         </form>
@@ -804,8 +800,8 @@ app.get("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 // TRACKER ROUTES
 // ---------------------------------------------------------------------------
-app.post("/tracker/start",    async (req, res) => { await saveSetting("autoPriceTrack", 1); startPriceTracker(); res.redirect("/"); });
-app.post("/tracker/stop",     async (req, res) => { await saveSetting("autoPriceTrack", 0); stopPriceTracker();  res.redirect("/"); });
+app.post("/tracker/start", async (req, res) => { await saveSetting("autoPriceTrack", 1); startPriceTracker(); res.redirect("/"); });
+app.post("/tracker/stop",  async (req, res) => { await saveSetting("autoPriceTrack", 0); stopPriceTracker();  res.redirect("/"); });
 app.post("/tracker/poll-now", async (req, res) => { await runPriceTracker(); res.redirect("/"); });
 
 // ---------------------------------------------------------------------------
@@ -919,8 +915,6 @@ app.post("/execution/:id/approve", async (req, res) => {
       type:       exec.type,
       sl:         exec.sl,
       tp1:        exec.tp1,
-      tp2:        exec.tp2,
-      tp3:        exec.tp3,
       brokerSize: exec.brokerSize,
       strategyId: exec.strategyId,
       signal:     exec.signal
@@ -960,7 +954,7 @@ app.post("/execution/:id/cancel", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// WEBHOOK — main entry point
+// WEBHOOK — main entry point for all TradingView signals
 // ---------------------------------------------------------------------------
 app.post("/webhook/tradingview", async (req, res) => {
   try {
@@ -971,9 +965,10 @@ app.post("/webhook/tradingview", async (req, res) => {
     const brokerFromSignal = sanitizeString(payload.broker, "").toUpperCase();
     const activeBroker     = brokerFromSignal || DEFAULT_BROKER;
 
-    const signalType  = sanitizeString(payload.signal,      "");
-    const macroRegime = sanitizeString(payload.macroRegime, "");
-    const macroPhase  = sanitizeString(payload.macroPhase,  "");
+    // ── Extract all fields including new H2 CTE signal fields ─────────────
+    const signalType  = sanitizeString(payload.signal,       "");   // SWING, SCALP_CONTRA, INTRADAY, MOMENTUM_SCALP, POSITION
+    const macroRegime = sanitizeString(payload.macroRegime,  "");   // BULL, BEAR, TRANSITIONING
+    const macroPhase  = sanitizeString(payload.macroPhase,   "");   // e.g. "Pullback — Entry Zone"
 
     const alertRecord = {
       id:          `alert_${Date.now()}`,
@@ -1056,18 +1051,16 @@ app.post("/webhook/tradingview", async (req, res) => {
       };
       await dbInsertExecution(execRecord);
 
-      // ── AUTO MODE ───────────────────────────────────────────────────────
+      // ── AUTO MODE: fire immediately ─────────────────────────────────────
       if (EXECUTION_MODE === "AUTO") {
         try {
-          console.log(`[AUTO] ${signalType || "signal"} | ${activeBroker} | ${execRecord.symbol} ${execRecord.type} | size: ${execRecord.brokerSize} | sl: ${execRecord.sl} | tp1: ${execRecord.tp1}`);
+          console.log(`[AUTO] ${signalType || "signal"} | ${activeBroker} | ${execRecord.symbol} ${execRecord.type} | size: ${execRecord.brokerSize} | regime: ${macroRegime}`);
 
           const result = await routePlaceMarketOrder(activeBroker, {
             symbol:     execRecord.symbol,
             type:       execRecord.type,
             sl:         execRecord.sl,
             tp1:        execRecord.tp1,
-            tp2:        execRecord.tp2,
-            tp3:        execRecord.tp3,
             brokerSize: execRecord.brokerSize,
             strategyId: execRecord.strategyId,
             signal:     signalType
@@ -1102,8 +1095,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       }
     }
 
-    console.log(`Webhook: ${alertRecord.type} ${alertRecord.symbol} | signal: ${signalType || "n/a"} | entry: ${alertRecord.entry} | sl: ${alertRecord.sl} | tp1: ${alertRecord.tp1} → ${activeBroker}`);
-    return res.json({ ok: true, message: "Webhook received", alertId: alertRecord.id, signal: signalType });
+    console.log(`Webhook: ${alertRecord.type} ${alertRecord.symbol} | signal: ${signalType || "n/a"} | regime: ${macroRegime} | entry: ${alertRecord.entry} → ${activeBroker}`);
+    return res.json({ ok: true, message: "Webhook received", alertId: alertRecord.id, signal: signalType, macroRegime });
   } catch (err) {
     console.error("Webhook error:", err);
     return res.status(500).json({ ok: false, error: "Server error" });
@@ -1135,7 +1128,7 @@ app.get("/health", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// SETTINGS PAGE
+// SETTINGS PAGE (unchanged from original — keeping full version)
 // ---------------------------------------------------------------------------
 app.get("/settings", async (req, res) => {
   try {
@@ -1160,29 +1153,29 @@ app.get("/settings", async (req, res) => {
 
     const html = renderPage(APP_NAME + " · Settings", `
       <div class="topbar">
-        <div><h1>Settings</h1><div class="muted">Configure your system without touching code</div></div>
-        <div class="nav"><a href="/">← Dashboard</a><a href="/settings" style="color:#ffd978;font-weight:bold;">Settings</a><a href="/health">Health</a></div>
+        <div><h1>⚙ Settings</h1><div class="muted">Configure your system without touching code</div></div>
+        <div class="nav"><a href="/">← Dashboard</a><a href="/settings" style="color:#ffd978;font-weight:bold;">⚙ Settings</a><a href="/health">Health</a></div>
       </div>
-      ${msg ? `<div style="background:rgba(0,180,90,.15);border:1px solid #0c8a54;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#72f0ab;font-weight:bold;">${msg}</div>` : ""}
-      ${err ? `<div style="background:rgba(220,70,70,.15);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#ff9a9a;font-weight:bold;">${err}</div>` : ""}
+      ${msg ? `<div style="background:rgba(0,180,90,.15);border:1px solid #0c8a54;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#72f0ab;font-weight:bold;">✅ ${msg}</div>` : ""}
+      ${err ? `<div style="background:rgba(220,70,70,.15);border:1px solid #b43737;border-radius:10px;padding:12px 16px;margin-bottom:20px;color:#ff9a9a;font-weight:bold;">❌ ${err}</div>` : ""}
       <div class="section card" style="margin-bottom:20px;">
-        <h2>Active Broker</h2>
+        <h2>📡 Active Broker</h2>
         <div style="font-size:24px;font-weight:bold;color:#ffd978;">${DEFAULT_BROKER}</div>
-        <div class="muted" style="margin-top:8px;font-size:13px;">To change: Railway Variables → DEFAULT_BROKER</div>
+        <div class="muted" style="margin-top:8px;font-size:13px;">To change: Railway → Variables → DEFAULT_BROKER</div>
       </div>
       <div class="section card" style="margin-bottom:20px;">
-        <h2>Execution Mode</h2>
+        <h2>🚦 Execution Mode</h2>
         <div style="color:#9aa4b2;font-size:13px;">Current: <strong style="color:${isAuto?"#ffd978":"#72f0ab"};">${execMode}</strong> — change via Railway Variables → EXECUTION_MODE</div>
       </div>
       <div class="section card" style="margin-bottom:20px;">
-        <h2>Broker Setup — IG Markets</h2>
+        <h2>🔑 Broker Setup — IG Markets</h2>
         <form method="POST" action="/settings/broker">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px;">
             <div>
               <div class="label">Account Mode</div>
               <div style="display:flex;gap:8px;margin-top:4px;">
-                <button type="submit" name="accountMode" value="DEMO" style="flex:1;background:${!isLive?"#0c8a54":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">DEMO</button>
-                <button type="submit" name="accountMode" value="LIVE" style="flex:1;background:${isLive?"#b43737":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">LIVE</button>
+                <button type="submit" name="accountMode" value="DEMO" style="flex:1;background:${!isLive?"#0c8a54":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">${!isLive?"✅ ":""}DEMO</button>
+                <button type="submit" name="accountMode" value="LIVE" style="flex:1;background:${isLive?"#b43737":"#2a303a"};border:0;color:white;border-radius:10px;padding:10px;cursor:pointer;font-weight:bold;">${isLive?"🔴 ":""}LIVE</button>
               </div>
               <div style="color:#9aa4b2;font-size:12px;margin-top:6px;">Current: <strong style="color:${isLive?"#ff9a9a":"#72f0ab"}">${accountMode}</strong></div>
             </div>
@@ -1197,86 +1190,37 @@ app.get("/settings", async (req, res) => {
         </form>
       </div>
       <div class="section card" style="margin-bottom:20px;">
-        <h2>Instruments — IC Markets Symbol Reference</h2>
-        <p style="color:#9aa4b2;font-size:13px;margin-bottom:16px;">These are the exact values to use in the <strong>Symbol Override</strong> field of your TradingView indicator. The MT5 name column is what gets sent to IC Markets.</p>
-
-        <h3 style="color:#ffd978;margin-bottom:10px;">Indices</h3>
-        <div style="overflow-x:auto;margin-bottom:20px;">
-          <table style="min-width:600px;">
-            <thead><tr><th>Index</th><th>Symbol Override (use this)</th><th>MT5 name</th><th>Strategy ID example</th></tr></thead>
-            <tbody>
-              ${[
-                ['Nikkei 225',     'JP225',   'JP225Cash', 'LSM_BOT_JP225'],
-                ['Nasdaq 100',     'USTEC',   'USTEC',     'LSM_BOT_USTEC'],
-                ['Dow Jones',      'US30',    'US30',      'LSM_BOT_US30'],
-                ['S&P 500',        'US500',   'US500',     'LSM_BOT_US500'],
-                ['DAX 40',         'DE40',    'DE40',      'LSM_BOT_DE40'],
-                ['FTSE 100',       'UK100',   'UK100',     'LSM_BOT_UK100'],
-                ['Russell 2000',   'US2000',  'US2000',    'LSM_BOT_US2000'],
-                ['China 50',       'CHINA50', 'CHINA50',   'LSM_BOT_CHINA50'],
-                ['Hong Kong 50',   'HK50',    'HK50',      'LSM_BOT_HK50'],
-                ['Euro Stoxx 50',  'STOXX50', 'STOXX50',   'LSM_BOT_STOXX50'],
-                ['Australia 200',  'AUS200',  'AUS200',    'LSM_BOT_AUS200'],
-                ['France 40',      'F40',     'F40',       'LSM_BOT_F40'],
-                ['Switzerland 20', 'SWI20',   'SWI20',     'LSM_BOT_SWI20'],
-                ['Spain 35',       'ES35',    'ES35',      'LSM_BOT_ES35'],
-                ['South Africa 40','SA40',    'SA40',      'LSM_BOT_SA40'],
-                ['Italy 40',       'IT40',    'IT40',      'LSM_BOT_IT40'],
-                ['Netherlands 25', 'NETH25',  'NETH25',    'LSM_BOT_NETH25'],
-                ['Norway 25',      'NOR25',   'NOR25',     'LSM_BOT_NOR25'],
-                ['Canada 60',      'CA60',    'CA60',      'LSM_BOT_CA60'],
-                ['Sweden 30',      'SE30',    'SE30',      'LSM_BOT_SE30'],
-              ].map(([n,s,m,id]) => `<tr><td>${n}</td><td style="color:#ffd978;font-family:monospace;">${s}</td><td style="color:#9aa4b2;font-family:monospace;">${m}</td><td style="color:#9fc2ff;font-size:12px;">${id}</td></tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-
-        <h3 style="color:#72f0ab;margin-bottom:10px;">Forex — Major &amp; Minor Pairs</h3>
-        <div style="overflow-x:auto;margin-bottom:20px;">
-          <table style="min-width:400px;">
-            <thead><tr><th>Pair</th><th>Symbol Override</th><th>Pair</th><th>Symbol Override</th><th>Pair</th><th>Symbol Override</th></tr></thead>
-            <tbody>
-              ${[
-                ['EURUSD','EURUSD','GBPUSD','GBPUSD','USDJPY','USDJPY'],
-                ['USDCHF','USDCHF','USDCAD','USDCAD','AUDUSD','AUDUSD'],
-                ['NZDUSD','NZDUSD','EURGBP','EURGBP','EURJPY','EURJPY'],
-                ['GBPJPY','GBPJPY','EURAUD','EURAUD','AUDJPY','AUDJPY'],
-                ['EURCHF','EURCHF','GBPCHF','GBPCHF','CHFJPY','CHFJPY'],
-                ['EURCAD','EURCAD','GBPCAD','GBPCAD','CADJPY','CADJPY'],
-                ['EURNZD','EURNZD','GBPNZD','GBPNZD','NZDJPY','NZDJPY'],
-                ['AUDCAD','AUDCAD','AUDCHF','AUDCHF','AUDNZD','AUDNZD'],
-                ['USDZAR','USDZAR','USDMXN','USDMXN','USDSGD','USDSGD'],
-                ['EURZAR','EURZAR','USDSEK','USDSEK','USDNOK','USDNOK'],
-              ].map(([n1,s1,n2,s2,n3,s3]) => `<tr><td>${n1}</td><td style="color:#ffd978;font-family:monospace;">${s1}</td><td>${n2}</td><td style="color:#ffd978;font-family:monospace;">${s2}</td><td>${n3}</td><td style="color:#ffd978;font-family:monospace;">${s3}</td></tr>`).join('')}
-            </tbody>
-          </table>
-          <div style="color:#9aa4b2;font-size:12px;margin-top:8px;">All IC Markets forex pairs supported. Symbol Override = pair name exactly as shown (e.g. EURUSD, GBPJPY).</div>
-        </div>
-
-        <h3 style="color:#c8a8f8;margin-bottom:10px;">Crypto</h3>
-        <div style="overflow-x:auto;">
-          <table style="min-width:400px;">
-            <thead><tr><th>Crypto</th><th>Symbol Override</th><th>Crypto</th><th>Symbol Override</th><th>Crypto</th><th>Symbol Override</th></tr></thead>
-            <tbody>
-              ${[
-                ['Bitcoin',  'BTCUSD', 'Ethereum', 'ETHUSD',  'Solana',   'SOLUSD'],
-                ['BNB',      'BNBUSD', 'XRP',      'XRPUSD',  'Cardano',  'ADAUSD'],
-                ['Polkadot', 'DOTUSD', 'Litecoin', 'LTCUSD',  'Chainlink','LNKUSD'],
-                ['Uniswap',  'UNIUSD', 'Avalanche','AVXUSD',  'Atom',     'ATOMUSD'],
-                ['Stellar',  'XLMUSD', 'Algorand', 'ALGOUSD', 'Monero',   'XMRUSD'],
-                ['Tezos',    'XTZUSD', 'Zcash',    'ZECUSD',  'Filecoin', 'FILUSD'],
-                ['Near',     'NEARUSD','Injective', 'INJUSD',  'Sui',      'SUIUSD'],
-                ['Arbitrum', 'ARBUSD', 'Optimism', 'OPUSD',   'Aptos',    'APTUSD'],
-                ['FET',      'FETUSD', 'Hedera',   'HBARUSD', 'Render',   'RENDERUSD'],
-                ['Toncoin',  'TONUSD', 'Tao',      'TAOUSD',  'Sei',      'SEIUSD'],
-              ].map(([n1,s1,n2,s2,n3,s3]) => `<tr><td>${n1}</td><td style="color:#ffd978;font-family:monospace;">${s1}</td><td>${n2}</td><td style="color:#ffd978;font-family:monospace;">${s2}</td><td>${n3}</td><td style="color:#ffd978;font-family:monospace;">${s3}</td></tr>`).join('')}
-            </tbody>
-          </table>
-          <div style="color:#9aa4b2;font-size:12px;margin-top:8px;">Full IC Markets crypto list supported. Symbol Override = ticker exactly as shown (e.g. BTCUSD, SOLUSD).</div>
-        </div>
+        <h2>📊 Instruments</h2>
+        <form method="POST" action="/settings/instruments">
+          <div style="overflow-x:auto;">
+            <table style="min-width:750px;">
+              <thead><tr><th>Market</th><th>TradingView Symbol</th><th>IG Epic Code</th><th>Default Size</th><th>Status</th></tr></thead>
+              <tbody>
+                ${[
+                  {key:"JP225",  label:"Japan 225 (Nikkei)",  epicHint:"IX.D.NIKKEI.IFM.IP",  tvHint:"JP225, NI225"},
+                  {key:"NAS100", label:"Nasdaq 100",          epicHint:"IX.D.NASDAQ.IFD.IP",  tvHint:"NAS100, NDX"},
+                  {key:"DAX40",  label:"Germany 40 (DAX)",   epicHint:"IX.D.DAX.IFD.IP",     tvHint:"DAX, GER40"},
+                  {key:"SP500",  label:"US 500 (S&P)",       epicHint:"IX.D.SPTRD.IFD.IP",   tvHint:"SPX500, US500"},
+                  {key:"DOW",    label:"Wall Street (Dow)",  epicHint:"IX.D.DOW.IFD.IP",     tvHint:"US30, DJI"},
+                  {key:"FTSE",   label:"UK 100 (FTSE)",      epicHint:"IX.D.FTSE.IFD.IP",    tvHint:"UK100, FTSE"},
+                  {key:"AUS200", label:"Australia 200",      epicHint:"IX.D.ASX.IFD.IP",     tvHint:"AUS200, ASX200"}
+                ].map(inst => {
+                  const tvSym = epics["tv_" + inst.key] || "";
+                  return `<tr>
+                    <td style="font-weight:bold;">${inst.label}</td>
+                    <td><input type="text" name="tv_${inst.key}" value="${tvSym}" placeholder="${inst.tvHint}" style="width:160px;" /></td>
+                    <td><input type="text" name="epic_${inst.key}" value="${epics[inst.key]}" placeholder="${inst.epicHint}" style="width:200px;" /></td>
+                    <td><input type="number" name="size_${inst.key}" value="${epicSizes[inst.key]||1}" min="0.1" step="0.1" style="width:80px;" /></td>
+                    <td>${epics[inst.key]?'<span class="pill pill-green">✅ Set</span>':'<span class="pill pill-gray">Not set</span>'}</td>
+                  </tr>`;}).join("")}
+              </tbody>
+            </table>
+          </div>
+          <div style="margin-top:16px;"><button type="submit" class="btn-green">Save Instruments</button></div>
+        </form>
       </div>
       <div class="section card" style="margin-bottom:20px;">
-        <h2>Risk Management</h2>
+        <h2>💰 Risk Management</h2>
         <form method="POST" action="/settings/risk">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px;">
             <div><div class="label">USD value per pip</div><input type="number" name="usdPerPip" min="0.01" step="0.01" value="${settingsCache.usdPerPip||0.1}" style="width:100%;box-sizing:border-box;" /></div>
@@ -1292,14 +1236,14 @@ app.get("/settings", async (req, res) => {
         </form>
       </div>
       <div class="section card">
-        <h2>Webhook & System Info</h2>
+        <h2>🔗 Webhook & System Info</h2>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;">
           <div class="stat"><div class="k">Webhook URL</div><div class="v" style="font-size:12px;word-break:break-all;">https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview</div></div>
           <div class="stat"><div class="k">Webhook Secret</div><div class="v">${process.env.WEBHOOK_SECRET?"••••••••"+process.env.WEBHOOK_SECRET.slice(-4):"Not set"}</div></div>
           <div class="stat"><div class="k">Execution Mode</div><div class="v" style="color:${isAuto?"#ffd978":"#72f0ab"};">${execMode}</div></div>
           <div class="stat"><div class="k">Active Broker</div><div class="v" style="color:#ffd978;">${DEFAULT_BROKER}</div></div>
           <div class="stat"><div class="k">Database</div><div class="v" style="color:#98f0ff;">PostgreSQL — persistent</div></div>
-          <div class="stat"><div class="k">Signal Types</div><div class="v" style="font-size:11px;">${Object.keys(SIGNAL_CONFIG).join(" · ")}</div></div>
+          <div class="stat"><div class="k">Signal Types Supported</div><div class="v" style="font-size:11px;">SWING · SCALP_CONTRA · INTRADAY · MOMENTUM_SCALP · POSITION</div></div>
         </div>
       </div>
     `);
@@ -1353,7 +1297,7 @@ app.post("/settings/risk", async (req, res) => {
     await saveSetting("usdPerPip",       Math.max(0.001, Number(req.body.usdPerPip) || 0.1));
     await saveSetting("ig_default_size", Math.max(0.1, Number(req.body.defaultSize) || 1));
     await saveSetting("pollIntervalSec", Math.max(30, Number(req.body.pollIntervalSec) || 60));
-    await saveSetting("beAfterTp1",      req.body.beAfterTp1     ? 1 : 0);
+    await saveSetting("beAfterTp1",      req.body.beAfterTp1    ? 1 : 0);
     await saveSetting("autoCloseAtTp3",  req.body.autoCloseAtTp3 ? 1 : 0);
     await saveSetting("autoPriceTrack",  req.body.autoPriceTrack  ? 1 : 0);
     await loadBrokerConfig();
@@ -1364,60 +1308,98 @@ app.post("/settings/risk", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // PERFORMANCE PAGE
+// Shows per-indicator, per-signal-type profitability with date range filter
 // ---------------------------------------------------------------------------
 app.get("/performance", async (req, res) => {
   try {
     const fromDate = req.query.from || "";
     const toDate   = req.query.to   || "";
 
+    // Build date filter for PostgreSQL
     let dateFilter = "";
     const params = [];
     if (fromDate) { params.push(fromDate + "T00:00:00Z"); dateFilter += ` AND created_at >= $${params.length}`; }
     if (toDate)   { params.push(toDate   + "T23:59:59Z"); dateFilter += ` AND created_at <= $${params.length}`; }
 
+    // Pull all trades in range
     const result = await db.query(
       `SELECT data FROM trades WHERE 1=1 ${dateFilter} ORDER BY created_at ASC`,
       params
     );
     const trades = result.rows.map(r => r.data);
 
+    // ── Compute stats ──────────────────────────────────────────────────────
+    // Group by strategyId → signal
     const groups = {};
     for (const t of trades) {
       const sid = t.strategyId || "UNKNOWN";
       const sig = t.signal     || "—";
       const key = sid + "|||" + sig;
-      if (!groups[key]) groups[key] = { strategyId: sid, signal: sig, total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0, rTotal: 0 };
+      if (!groups[key]) {
+        groups[key] = {
+          strategyId: sid, signal: sig,
+          total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0,
+          rTotal: 0
+        };
+      }
       const g = groups[key];
       g.total++;
       const status = String(t.status || "").toUpperCase();
-      if (status.includes("TP3"))      { g.tp3++; g.tp2++; g.tp1++; g.rTotal += 3; }
+      if (status.includes("TP3"))     { g.tp3++; g.tp2++; g.tp1++; g.rTotal += 3; }
       else if (status.includes("TP2")) { g.tp2++; g.tp1++; g.rTotal += 2; }
       else if (status.includes("TP1")) { g.tp1++; g.rTotal += 1; }
       else if (status.includes("STOP")) { g.stopped++; g.rTotal -= 1; }
       else { g.open++; }
     }
 
+    // Sort: by strategyId then signal
     const rows = Object.values(groups).sort((a, b) =>
       a.strategyId.localeCompare(b.strategyId) || a.signal.localeCompare(b.signal)
     );
 
+    // Group by strategyId for summary
     const summary = {};
     for (const g of rows) {
-      if (!summary[g.strategyId]) summary[g.strategyId] = { total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0, rTotal: 0 };
+      if (!summary[g.strategyId]) {
+        summary[g.strategyId] = { total: 0, tp1: 0, tp2: 0, tp3: 0, stopped: 0, open: 0, rTotal: 0 };
+      }
       const s = summary[g.strategyId];
-      s.total += g.total; s.tp1 += g.tp1; s.tp2 += g.tp2; s.tp3 += g.tp3;
-      s.stopped += g.stopped; s.open += g.open; s.rTotal += g.rTotal;
+      s.total   += g.total;
+      s.tp1     += g.tp1;
+      s.tp2     += g.tp2;
+      s.tp3     += g.tp3;
+      s.stopped += g.stopped;
+      s.open    += g.open;
+      s.rTotal  += g.rTotal;
     }
 
-    function pct(n, d) { if (!d) return "—"; return (n / d * 100).toFixed(0) + "%"; }
-    function rColor(r) { if (r > 0) return "color:#72f0ab;font-weight:bold;"; if (r < 0) return "color:#ff9a9a;font-weight:bold;"; return "color:#9aa4b2;"; }
-    function winRate(g) { const closed = g.total - g.open; if (!closed) return "—"; return (g.tp1 / closed * 100).toFixed(0) + "%"; }
+    // ── HTML helpers ────────────────────────────────────────────────────────
+    function pct(n, d) {
+      if (!d) return "—";
+      return (n / d * 100).toFixed(0) + "%";
+    }
+    function rColor(r) {
+      if (r > 0) return "color:#72f0ab;font-weight:bold;";
+      if (r < 0) return "color:#ff9a9a;font-weight:bold;";
+      return "color:#9aa4b2;";
+    }
+    function winRate(g) {
+      const closed = g.total - g.open;
+      if (!closed) return "—";
+      return (g.tp1 / closed * 100).toFixed(0) + "%";
+    }
     function signalBadge(sig) {
-      const colors = { SWING:"#72f0ab", SCALP_CONTRA:"#ffd978", INTRADAY:"#9fc2ff", MOMENTUM_SCALP:"#c8a8f8", POSITION:"#98f0ff", STRONG_LONG:"#72f0ab", STRONG_SHORT:"#ff9a9a", APLUS_LONG:"#72f0ab", APLUS_SHORT:"#ff9a9a", BOS_UP:"#72f0ab", BOS_DN:"#ff9a9a", RAID_LONG:"#72f0ab", RAID_SHORT:"#ff9a9a" };
+      const colors = {
+        SWING: "#72f0ab", SCALP_CONTRA: "#ffd978", INTRADAY: "#9fc2ff",
+        MOMENTUM_SCALP: "#c8a8f8", POSITION: "#98f0ff",
+        STRONG_LONG: "#72f0ab", STRONG_SHORT: "#ff9a9a",
+        APLUS_LONG: "#72f0ab", APLUS_SHORT: "#ff9a9a"
+      };
       const c = colors[sig] || "#d3d7de";
       return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:bold;background:rgba(255,255,255,.08);color:${c};">${sig}</span>`;
     }
 
+    // ── Summary cards ───────────────────────────────────────────────────────
     const totalTrades  = trades.length;
     const totalTP1     = trades.filter(t => String(t.status||"").toUpperCase().includes("TP1")).length;
     const totalStopped = trades.filter(t => String(t.status||"").toUpperCase().includes("STOP")).length;
@@ -1426,17 +1408,22 @@ app.get("/performance", async (req, res) => {
     const overallWR    = closedTrades ? (totalTP1 / closedTrades * 100).toFixed(1) : "—";
     const totalR       = Object.values(summary).reduce((a, s) => a + s.rTotal, 0);
 
+    // ── Summary table per indicator ─────────────────────────────────────────
     const summaryRows = Object.entries(summary).map(([sid, s]) => `
       <tr>
         <td style="font-weight:bold;color:#ffd978;">${sid}</td>
-        <td>${s.total}</td><td>${s.total - s.open}</td>
+        <td>${s.total}</td>
+        <td>${s.total - s.open}</td>
         <td style="${rColor(s.rTotal)}">${s.rTotal > 0 ? "+" : ""}${s.rTotal.toFixed(1)}R</td>
-        <td>${winRate(s)}</td><td>${pct(s.tp1, s.total - s.open)}</td>
-        <td>${pct(s.tp2, s.total - s.open)}</td><td>${pct(s.tp3, s.total - s.open)}</td>
+        <td>${winRate(s)}</td>
+        <td>${pct(s.tp1, s.total - s.open)}</td>
+        <td>${pct(s.tp2, s.total - s.open)}</td>
+        <td>${pct(s.tp3, s.total - s.open)}</td>
         <td style="color:#ff9a9a;">${pct(s.stopped, s.total - s.open)}</td>
         <td style="color:#9aa4b2;">${s.open}</td>
       </tr>`).join("");
 
+    // ── Detailed breakdown rows ─────────────────────────────────────────────
     let lastSid = "";
     const detailRows = rows.map(g => {
       const closed = g.total - g.open;
@@ -1446,18 +1433,23 @@ app.get("/performance", async (req, res) => {
         <tr ${isNew ? 'style="border-top:2px solid #3a4555;"' : ""}>
           <td style="color:#9aa4b2;font-size:12px;">${isNew ? g.strategyId : ""}</td>
           <td>${signalBadge(g.signal)}</td>
-          <td>${g.total}</td><td>${closed}</td>
+          <td>${g.total}</td>
+          <td>${closed}</td>
           <td style="${rColor(g.rTotal)}">${g.rTotal > 0 ? "+" : ""}${g.rTotal.toFixed(1)}R</td>
-          <td>${winRate(g)}</td><td>${pct(g.tp1, closed)}</td>
-          <td>${pct(g.tp2, closed)}</td><td>${pct(g.tp3, closed)}</td>
+          <td>${winRate(g)}</td>
+          <td>${pct(g.tp1, closed)}</td>
+          <td>${pct(g.tp2, closed)}</td>
+          <td>${pct(g.tp3, closed)}</td>
           <td style="color:#ff9a9a;">${pct(g.stopped, closed)}</td>
           <td style="color:#9aa4b2;">${g.open}</td>
         </tr>`;
     }).join("");
 
+    // ── Recent trades table ─────────────────────────────────────────────────
     const recentRows = [...trades].reverse().slice(0, 50).map(t => {
       const status = String(t.status || "").toUpperCase();
-      const sColor = status.includes("TP3") ? "#72f0ab" : status.includes("TP2") ? "#72f0ab" : status.includes("TP1") ? "#9fc2ff" : status.includes("STOP") ? "#ff9a9a" : "#9aa4b2";
+      const sColor = status.includes("TP3") ? "#72f0ab" : status.includes("TP2") ? "#72f0ab"
+        : status.includes("TP1") ? "#9fc2ff" : status.includes("STOP") ? "#ff9a9a" : "#9aa4b2";
       return `
         <tr>
           <td style="font-size:11px;color:#9aa4b2;">${(t.createdAt||"").substring(0,16).replace("T"," ")}</td>
@@ -1465,8 +1457,10 @@ app.get("/performance", async (req, res) => {
           <td>${signalBadge(t.signal||"—")}</td>
           <td>${typePill(t.type)}</td>
           <td>${t.symbol||"—"}</td>
-          <td>${formatNumber(t.entry,0)}</td><td>${formatNumber(t.sl,0)}</td>
-          <td>${formatNumber(t.tp1,0)}</td><td>${formatNumber(t.tp2,0)}</td>
+          <td>${formatNumber(t.entry,0)}</td>
+          <td>${formatNumber(t.sl,0)}</td>
+          <td>${formatNumber(t.tp1,0)}</td>
+          <td>${formatNumber(t.tp2,0)}</td>
           <td style="color:${sColor};font-weight:bold;">${t.status||"—"}</td>
           <td style="font-size:11px;color:#9aa4b2;">${t.macroRegime||"—"}</td>
         </tr>`;
@@ -1474,53 +1468,95 @@ app.get("/performance", async (req, res) => {
 
     const html = renderPage(APP_NAME + " · Performance", `
       <div class="topbar">
-        <div><h1>Signal Performance</h1><div class="muted">Per-indicator and per-signal-type profitability</div></div>
-        <div class="nav"><a href="/">← Dashboard</a><a href="/performance" style="color:#ffd978;font-weight:bold;">Performance</a><a href="/settings">Settings</a><a href="/health">Health</a></div>
+        <div>
+          <h1>📊 Signal Performance</h1>
+          <div class="muted">Per-indicator and per-signal-type profitability</div>
+        </div>
+        <div class="nav">
+          <a href="/">← Dashboard</a>
+          <a href="/performance" style="color:#ffd978;font-weight:bold;">📊 Performance</a>
+          <a href="/settings">⚙ Settings</a>
+          <a href="/health">Health</a>
+        </div>
       </div>
+
+      <!-- DATE FILTER -->
       <div class="card" style="margin-bottom:20px;">
         <h2 style="margin-bottom:12px;">Date Range Filter</h2>
         <form method="GET" action="/performance" style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
-          <div><div class="label">From date</div><input type="date" name="from" value="${fromDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" /></div>
-          <div><div class="label">To date</div><input type="date" name="to" value="${toDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" /></div>
+          <div>
+            <div class="label">From date</div>
+            <input type="date" name="from" value="${fromDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" />
+          </div>
+          <div>
+            <div class="label">To date</div>
+            <input type="date" name="to" value="${toDate}" style="background:#0f1319;border:1px solid #2a303a;color:#e8ecf1;border-radius:10px;padding:10px 12px;font-size:14px;" />
+          </div>
           <button type="submit" class="btn-green">Apply Filter</button>
           <a href="/performance"><button type="button" class="btn-gray">Clear Filter</button></a>
         </form>
-        <div style="margin-top:10px;color:#9aa4b2;font-size:13px;">${fromDate || toDate ? `Showing: ${fromDate || "all time"} → ${toDate || "now"}` : "Showing: all time"} · ${totalTrades} trade${totalTrades !== 1 ? "s" : ""} found</div>
+        <div style="margin-top:10px;color:#9aa4b2;font-size:13px;">
+          ${fromDate || toDate ? `Showing: ${fromDate || "all time"} → ${toDate || "now"}` : "Showing: all time"}
+          · ${totalTrades} trade${totalTrades !== 1 ? "s" : ""} found
+        </div>
       </div>
+
+      <!-- SUMMARY STATS -->
       <div class="grid" style="margin-bottom:20px;">
         <div class="card"><div class="label">Total Trades</div><div class="big">${totalTrades}</div></div>
         <div class="card"><div class="label">Closed Trades</div><div class="big">${closedTrades}</div></div>
-        <div class="card"><div class="label">Overall Win Rate</div><div class="big" style="color:${Number(overallWR) >= 50 ? "#72f0ab" : "#ff9a9a"};">${overallWR}%</div></div>
+        <div class="card"><div class="label">Overall Win Rate (TP1+)</div><div class="big" style="color:${Number(overallWR) >= 50 ? "#72f0ab" : "#ff9a9a"};">${overallWR}%</div></div>
         <div class="card"><div class="label">Total R</div><div class="big" style="${rColor(totalR)}">${totalR > 0 ? "+" : ""}${totalR.toFixed(1)}R</div></div>
         <div class="card"><div class="label">Stopped Out</div><div class="big" style="color:#ff9a9a;">${totalStopped}</div></div>
         <div class="card"><div class="label">Still Open</div><div class="big" style="color:#9aa4b2;">${totalOpen}</div></div>
       </div>
+
+      <!-- PER INDICATOR SUMMARY -->
       <div class="section">
         <h2>By Indicator</h2>
-        <table><thead><tr><th>Indicator</th><th>Total</th><th>Closed</th><th>Total R</th><th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th></tr></thead>
-        <tbody>${summaryRows || `<tr><td colspan="10" style="color:#9aa4b2;">No closed trades in this period</td></tr>`}</tbody></table>
+        <table>
+          <thead><tr>
+            <th>Indicator</th><th>Total</th><th>Closed</th><th>Total R</th>
+            <th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th>
+          </tr></thead>
+          <tbody>${summaryRows || `<tr><td colspan="10" style="color:#9aa4b2;">No closed trades in this period</td></tr>`}</tbody>
+        </table>
       </div>
+
+      <!-- DETAILED BREAKDOWN BY INDICATOR + SIGNAL -->
       <div class="section">
-        <h2>By Indicator and Signal Type</h2>
-        <table><thead><tr><th>Indicator</th><th>Signal Type</th><th>Total</th><th>Closed</th><th>Total R</th><th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th></tr></thead>
-        <tbody>${detailRows || `<tr><td colspan="11" style="color:#9aa4b2;">No trades in this period</td></tr>`}</tbody></table>
+        <h2>By Indicator & Signal Type</h2>
+        <table>
+          <thead><tr>
+            <th>Indicator</th><th>Signal Type</th><th>Total</th><th>Closed</th><th>Total R</th>
+            <th>Win Rate</th><th>TP1%</th><th>TP2%</th><th>TP3%</th><th>Stopped%</th><th>Open</th>
+          </tr></thead>
+          <tbody>${detailRows || `<tr><td colspan="11" style="color:#9aa4b2;">No trades in this period</td></tr>`}</tbody>
+        </table>
       </div>
+
+      <!-- RECENT TRADE LOG -->
       <div class="section">
         <h2>Recent Trade Log (last 50)</h2>
         <div style="overflow-x:auto;">
           <table style="min-width:1000px;">
-            <thead><tr><th>Date</th><th>Indicator</th><th>Signal</th><th>Dir</th><th>Symbol</th><th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Result</th><th>Regime</th></tr></thead>
+            <thead><tr>
+              <th>Date</th><th>Indicator</th><th>Signal</th><th>Dir</th><th>Symbol</th>
+              <th>Entry</th><th>SL</th><th>TP1</th><th>TP2</th><th>Result</th><th>Regime</th>
+            </tr></thead>
             <tbody>${recentRows || `<tr><td colspan="11" style="color:#9aa4b2;">No trades in this period</td></tr>`}</tbody>
           </table>
         </div>
       </div>
     `);
+
     res.send(html);
   } catch (err) {
     console.error("Performance page error:", err);
     res.status(500).send("Performance error: " + err.message);
   }
 });
+
 
 // ---------------------------------------------------------------------------
 // STARTUP
