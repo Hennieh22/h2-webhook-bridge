@@ -54,7 +54,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Read back a single position to verify SL/TP were actually set
+// Read back a single position to verify SL/TP were set
 async function verifyPosition(positionId) {
   try {
     const positions = await metaApiRequest(
@@ -64,7 +64,7 @@ async function verifyPosition(positionId) {
     if (!Array.isArray(positions)) return null;
     const pos = positions.find(p => String(p.id) === String(positionId));
     if (pos) {
-      console.log(`[ICMarkets] Position ${positionId} verified — SL: ${pos.stopLoss ?? 'none'}  TP: ${pos.takeProfit ?? 'none'}  Price: ${pos.currentPrice}`);
+      console.log(`[ICMarkets] Position ${positionId} — SL: ${pos.stopLoss ?? 'none'}  TP: ${pos.takeProfit ?? 'none'}  Price: ${pos.currentPrice}`);
     } else {
       console.log(`[ICMarkets] Position ${positionId} not found in open positions`);
     }
@@ -75,37 +75,34 @@ async function verifyPosition(positionId) {
   }
 }
 
+// Fallback SL/TP setter — used only if initial order did not include them
 async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 2000) {
   const sl = parseFloat(stopLoss);
   const tp = parseFloat(takeProfit);
 
-  const hasSL = sl && sl > 0;
-  const hasTP = tp && tp > 0;
+  const hasSL = Number.isFinite(sl) && sl > 0;
+  const hasTP = Number.isFinite(tp) && tp > 0;
 
   if (!hasSL && !hasTP) {
-    console.log('[ICMarkets] setSlTp — no valid SL or TP provided, skipping');
+    console.log('[ICMarkets] setSlTp — no valid SL or TP, skipping');
     return { success: true, skipped: true };
   }
 
-  // Try both string and numeric positionId — MetaAPI behaviour varies by account type
-  const modBody = {
-    actionType: 'POSITION_MODIFY',
-    positionId: String(positionId),  // string first
-  };
-  if (hasSL) modBody.stopLoss   = sl;
-  if (hasTP) modBody.takeProfit = tp;
+  console.log(`[ICMarkets] setSlTp fallback — positionId: ${positionId}  SL: ${hasSL ? sl : 'none'}  TP: ${hasTP ? tp : 'none'}`);
 
-  console.log(`[ICMarkets] Setting SL/TP on position ${positionId} — SL: ${hasSL ? sl : 'none'}  TP: ${hasTP ? tp : 'none'}`);
-
+  // Try string positionId first, then numeric on retry
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       await sleep(delayMs * attempt);
 
-      // On attempt 2+, try with numeric positionId
-      if (attempt === 2) {
-        modBody.positionId = Number(positionId);
-        console.log(`[ICMarkets] Attempt ${attempt}: switching to numeric positionId`);
-      }
+      const modBody = {
+        actionType: 'POSITION_MODIFY',
+        positionId: attempt <= 2 ? String(positionId) : Number(positionId),
+      };
+      if (hasSL) modBody.stopLoss   = sl;
+      if (hasTP) modBody.takeProfit = tp;
+
+      console.log(`[ICMarkets] setSlTp attempt ${attempt} — positionId type: ${typeof modBody.positionId}`);
 
       const result = await metaApiRequest(
         'POST',
@@ -117,27 +114,23 @@ async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 
       console.log(`[ICMarkets] setSlTp attempt ${attempt} code: ${code}`);
 
       if (code === 'TRADE_RETCODE_DONE' || code === 'TRADE_RETCODE_NO_CHANGES') {
-        // Verify the stops actually landed by reading back the position
-        await sleep(1000);
+        await sleep(1500);
         const pos = await verifyPosition(positionId);
-
         if (pos) {
-          const slOk = !hasSL || (pos.stopLoss && Math.abs(pos.stopLoss - sl) < 1);
-          const tpOk = !hasTP || (pos.takeProfit && Math.abs(pos.takeProfit - tp) < 1);
-
+          // Use tolerance of 10 — indices like JP225 may round stops to nearest tick
+          const TOLERANCE = 10;
+          const slOk = !hasSL || (pos.stopLoss  != null && Math.abs(pos.stopLoss  - sl) <= TOLERANCE);
+          const tpOk = !hasTP || (pos.takeProfit != null && Math.abs(pos.takeProfit - tp) <= TOLERANCE);
           if (slOk && tpOk) {
-            console.log(`[ICMarkets] ✅ SL/TP CONFIRMED in MT5 — SL: ${pos.stopLoss}  TP: ${pos.takeProfit}`);
+            console.log(`[ICMarkets] SL/TP confirmed — SL: ${pos.stopLoss}  TP: ${pos.takeProfit}`);
             return { success: true, verified: true, raw: result };
-          } else {
-            console.log(`[ICMarkets] ⚠️ MetaAPI said DONE but stops NOT in MT5 — SL: ${pos.stopLoss}  TP: ${pos.takeProfit}`);
-            console.log(`[ICMarkets] Expected SL: ${sl}  TP: ${tp}`);
-            // Try again on next attempt
           }
+          console.log(`[ICMarkets] MetaAPI DONE but stops not matching — SL in MT5: ${pos.stopLoss}  expected: ${sl}  TP in MT5: ${pos.takeProfit}  expected: ${tp}`);
         }
       }
 
       if (code === 'TRADE_RETCODE_INVALID_STOPS') {
-        console.log(`[ICMarkets] INVALID_STOPS — SL: ${sl}  TP: ${tp} — check min stop distance`);
+        console.log(`[ICMarkets] INVALID_STOPS — SL: ${sl}  TP: ${tp}`);
         return { success: false, reason: 'INVALID_STOPS', raw: result };
       }
 
@@ -149,7 +142,7 @@ async function setSlTp(positionId, stopLoss, takeProfit, retries = 4, delayMs = 
     }
   }
 
-  return { success: false, reason: 'max retries — stops not confirmed in MT5' };
+  return { success: false, reason: 'max retries — stops not confirmed' };
 }
 
 async function placeMarketOrder(signal) {
@@ -157,9 +150,17 @@ async function placeMarketOrder(signal) {
   const actionType = signal.type === 'LONG' ? 'ORDER_TYPE_BUY' : 'ORDER_TYPE_SELL';
   const volume     = parseFloat(signal.brokerSize) || 1;
 
-  console.log(`[ICMarkets] Placing ${actionType} on ${mtSymbol} size=${volume}`);
+  const sl = parseFloat(signal.sl)  || null;
+  const tp = parseFloat(signal.tp1) || parseFloat(signal.tp) || null;
 
+  console.log(`[ICMarkets] Placing ${actionType} on ${mtSymbol}  size=${volume}  SL=${sl}  TP=${tp}`);
+
+  // ── Include SL/TP directly in the initial order body ──────────────────
+  // This is the most reliable method — atomic order+stops in one call.
+  // MetaAPI supports stopLoss/takeProfit on ORDER_TYPE_BUY and ORDER_TYPE_SELL.
   const orderBody = { actionType, symbol: mtSymbol, volume };
+  if (sl && sl > 0) orderBody.stopLoss   = sl;
+  if (tp && tp > 0) orderBody.takeProfit = tp;
 
   const result = await metaApiRequest(
     'POST',
@@ -171,32 +172,40 @@ async function placeMarketOrder(signal) {
   const orderId    = result.orderId    || null;
   const retCode    = result.stringCode || null;
 
-  console.log(`[ICMarkets] Trade placed — positionId: ${positionId}  orderId: ${orderId}  retCode: ${retCode}`);
+  console.log(`[ICMarkets] Order result — positionId: ${positionId}  orderId: ${orderId}  code: ${retCode}`);
 
   if (!positionId && !orderId) {
     throw new Error(`MT5 rejected order: ${retCode || 'unknown'} — ${result.message || JSON.stringify(result)}`);
   }
 
-  // Verify the position exists before trying to modify it
-  console.log(`[ICMarkets] Waiting for position to register in MT5...`);
+  // ── Verify position registered and stops are set ───────────────────────
   await sleep(3000);
   const posCheck = await verifyPosition(positionId);
-  if (!posCheck) {
-    console.log(`[ICMarkets] Position not yet visible — will still attempt SL/TP set`);
+
+  let slTpResult = { success: true, skipped: false, note: 'included in initial order' };
+
+  // If verification shows SL/TP missing despite being in the order,
+  // fall back to explicit POSITION_MODIFY
+  if (posCheck && (sl || tp)) {
+    const TOLERANCE = 10;
+    const slMissing = sl && (posCheck.stopLoss  == null || Math.abs(posCheck.stopLoss  - sl) > TOLERANCE);
+    const tpMissing = tp && (posCheck.takeProfit == null || Math.abs(posCheck.takeProfit - tp) > TOLERANCE);
+
+    if (slMissing || tpMissing) {
+      console.log(`[ICMarkets] SL/TP not in initial order result — falling back to POSITION_MODIFY`);
+      console.log(`[ICMarkets] Current SL: ${posCheck.stopLoss}  Current TP: ${posCheck.takeProfit}`);
+      slTpResult = await setSlTp(positionId, sl, tp);
+    } else {
+      console.log(`[ICMarkets] SL/TP confirmed in initial order — SL: ${posCheck.stopLoss}  TP: ${posCheck.takeProfit}`);
+    }
+  } else if (!posCheck && positionId && (sl || tp)) {
+    console.log(`[ICMarkets] Position not visible yet — attempting POSITION_MODIFY as fallback`);
+    slTpResult = await setSlTp(positionId, sl, tp);
   }
 
-  let slTpResult = { success: false, skipped: true };
-
-  if (positionId) {
-    const sl = parseFloat(signal.sl)  || null;
-    const tp = parseFloat(signal.tp1) || null;
-
-    slTpResult = await setSlTp(positionId, sl, tp);
-
-    if (!slTpResult.success && !slTpResult.skipped) {
-      console.log(`[ICMarkets] ⚠️ SL/TP not confirmed — reason: ${slTpResult.reason}`);
-      console.log(`[ICMarkets] Trade is open at broker. Bridge tracks SL/TP internally.`);
-    }
+  if (slTpResult.success === false) {
+    console.log(`[ICMarkets] WARNING: SL/TP not confirmed — reason: ${slTpResult.reason}`);
+    console.log(`[ICMarkets] Trade is open. Bridge tracks SL/TP internally.`);
   }
 
   return {
@@ -204,8 +213,8 @@ async function placeMarketOrder(signal) {
     positionId,
     orderId,
     dealRef:    positionId || orderId,
-    slTpSet:    slTpResult.success === true && !slTpResult.skipped,
-    slTpReason: slTpResult.reason || null,
+    slTpSet:    slTpResult.success === true,
+    slTpReason: slTpResult.reason || slTpResult.note || null,
     raw:        result,
   };
 }
