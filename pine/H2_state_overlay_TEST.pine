@@ -1,0 +1,427 @@
+// H2 State Overlay TEST v1.2
+// H2 Systematic Trading
+// © 2026 H2 Quant Systems
+//
+// TEST VERSION — all data hardcoded for visual layout validation.
+// Use this to verify panel appearance before connecting tv_bridge.py.
+// Do NOT use in live trading sessions.
+
+//@version=5
+indicator("H2 State Overlay TEST v1.2", overlay=true,
+          max_boxes_count=10, max_lines_count=50, max_labels_count=500,
+          shorttitle="H2-TEST")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GROUP 1 — LAYOUT & APPEARANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var G_LAYOUT = "── Layout & Appearance ──"
+
+i_left_pos = input.string("Top Left", "Left Panel Position",
+    options=["Top Left","Top Center","Top Right",
+             "Middle Left","Middle Center","Middle Right",
+             "Bottom Left","Bottom Center","Bottom Right"],
+    group=G_LAYOUT)
+
+i_right_pos = input.string("Top Right", "Right Panel Position",
+    options=["Top Left","Top Center","Top Right",
+             "Middle Left","Middle Center","Middle Right",
+             "Bottom Left","Bottom Center","Bottom Right"],
+    group=G_LAYOUT)
+
+i_text_header = input.string("Normal", "Header Text Size",
+    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+
+i_text_body = input.string("Small", "Body Text Size",
+    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+
+i_text_stats = input.string("Tiny", "Stats Text Size",
+    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+
+i_theme = input.string("Black", "Theme",
+    options=["Black","Dark","Midnight","Charcoal"], group=G_LAYOUT)
+
+i_opacity = input.int(10, "Panel Transparency %",
+    minval=0, maxval=90, step=5, group=G_LAYOUT)
+
+i_show_left    = input.bool(true, "Show State Panel (Left)",  group=G_LAYOUT)
+i_show_right   = input.bool(true, "Show Gate Panel (Right)",  group=G_LAYOUT)
+i_show_dwell   = input.bool(true, "Show Dwell Counter Label", group=G_LAYOUT)
+i_show_bg_tint = input.bool(true, "Show Background Tint",     group=G_LAYOUT)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HARDCODED TEST DATA
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Current state — JP225 A+ example
+t_state       = "BULL_STRONG_HIGH_ABOVE_NY_BOS_OB"
+t_description = "Bull trend · strong momentum · high vol · above liq · BOS printed · RSI overbought"
+t_session     = "NY"
+t_sast_time   = "15:45"
+t_dwell_bars  = 4
+t_dwell_avg   = 6.2
+
+// Next states
+t_next1 = "BULL_WEAK_NORMAL_ABOVE_NY_PULLBACK_NEUTRAL"
+t_prob1 = 0.48
+t_ev1   = 1.8
+
+t_next2 = "BULL_STRONG_HIGH_ABOVE_NY_BOS_OB"
+t_prob2 = 0.31
+t_ev2   = 2.1
+
+t_next3 = "BEAR_WEAK_HIGH_ABOVE_NY_CHOCH_OS"
+t_prob3 = 0.21
+t_ev3   = -0.4
+
+// Gate values — all passing
+t_g_markov_gap  = 0.68
+t_g_persistence = 0.87
+t_g_vol_cap     = 1.05
+t_g_hurst       = 0.61
+t_g_session_ok  = true
+
+// Conviction
+t_conviction = "A+"
+t_pillars    = 4
+t_hist_wr    = 0.71
+t_hist_ev    = 1.8
+t_samples    = 847
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAPPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+pos_from_string(pos_str) =>
+    switch pos_str
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right"  => position.bottom_right
+        =>                 position.top_left
+
+size_from_string(sz) =>
+    switch sz
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        =>          size.small
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THEME COLORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+bg_hex   = i_theme == "Black"    ? #000000 :
+           i_theme == "Dark"     ? #0d1117 :
+           i_theme == "Midnight" ? #010409 : #1a1a2e
+
+mid_hex  = i_theme == "Black"    ? #0a0a0a :
+           i_theme == "Dark"     ? #161b22 :
+           i_theme == "Midnight" ? #0d1117 : #16213e
+
+cell_hex = i_theme == "Black"    ? #111111 :
+           i_theme == "Dark"     ? #1c2128 :
+           i_theme == "Midnight" ? #161b22 : #0f3460
+
+C_BG   = color.new(bg_hex,   i_opacity)
+C_MID  = color.new(mid_hex,  i_opacity)
+C_CELL = color.new(cell_hex, i_opacity)
+C_HDR  = color.new(bg_hex,   math.max(0, i_opacity - 5))
+
+C_GREEN  = #26a69a
+C_RED    = #ef5350
+C_ORANGE = #ff9800
+C_GRAY   = #787b86
+C_PURPLE = #7c4dff
+C_GOLD   = #ffd700
+C_WHITE  = #ffffff
+
+frame_hex = i_theme == "Charcoal" ? #533483 : #7c4dff
+C_FRAME   = color.new(frame_hex, 20)
+C_BORDER  = color.new(#444444, 60)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DERIVED VALUES
+// ═══════════════════════════════════════════════════════════════════════════
+
+gate1_pass = t_g_markov_gap  >= 0.61
+gate2_pass = t_g_persistence >= 0.82
+gate3_pass = t_g_vol_cap     <= 1.25
+gate4_pass = t_g_hurst       >= 0.50
+gate5_pass = t_g_session_ok
+all_gates  = gate1_pass and gate2_pass and gate3_pass and gate4_pass and gate5_pass
+
+conv_color = t_conviction == "A+" ? C_GOLD   :
+             t_conviction == "A"  ? C_GREEN  :
+             t_conviction == "B"  ? C_ORANGE : C_RED
+
+dwell_pct   = t_dwell_avg > 0 ? t_dwell_bars / t_dwell_avg : 0.0
+dwell_color = dwell_pct >= 0.9 ? C_ORANGE :
+              dwell_pct >= 0.6 ? color.new(C_ORANGE, 60) : C_GRAY
+
+state_parts = str.split(t_state, "_")
+trend_lbl   = array.size(state_parts) > 0 ? array.get(state_parts, 0) : "?"
+trend_color = trend_lbl == "BULL" ? C_GREEN : trend_lbl == "BEAR" ? C_RED : C_GRAY
+
+prob_color(p) =>
+    p >= 0.60 ? C_GREEN : p >= 0.40 ? C_ORANGE : C_GRAY
+
+ev_color(e) =>
+    e > 0.3 ? C_GREEN : e < 0.0 ? C_RED : C_ORANGE
+
+gate_icon(g) => g ? "✓" : "✗"
+gate_col(g)  => g ? C_GREEN : C_RED
+gate_bg(g)   => g ? color.new(C_GREEN, 70) : color.new(C_RED, 70)
+
+sz_h = size_from_string(i_text_header)
+sz_b = size_from_string(i_text_body)
+sz_s = size_from_string(i_text_stats)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEFT TABLE — State panel
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table  tbl_left      = na
+var string prev_left_pos = ""
+
+if barstate.islast
+    if not i_show_left
+        if not na(tbl_left)
+            table.delete(tbl_left)
+            tbl_left      := na
+            prev_left_pos := ""
+    else
+        if i_left_pos != prev_left_pos or na(tbl_left)
+            if not na(tbl_left)
+                table.delete(tbl_left)
+            tbl_left      := table.new(pos_from_string(i_left_pos), 3, 9,
+                               bgcolor=C_BG, border_color=C_BORDER, border_width=1,
+                               frame_color=C_FRAME, frame_width=2)
+            prev_left_pos := i_left_pos
+
+        // ── Row 0: Header ────────────────────────────────────────────────────
+        sess_str = t_session + "  " + t_sast_time + " SAST"
+        table.cell(tbl_left, 0, 0, "H2 QUANT", text_color=C_GOLD,
+                   text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 0, "TEST MODE", text_color=C_ORANGE,
+                   text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_center)
+        table.merge_cells(tbl_left, 0, 0, 1, 0)
+        table.cell(tbl_left, 2, 0, sess_str, text_color=C_GRAY,
+                   text_size=sz_s, bgcolor=C_HDR, text_halign=text.align_right)
+
+        // ── Row 1: State ID ──────────────────────────────────────────────────
+        table.cell(tbl_left, 0, 1, "STATE", text_color=C_GRAY,
+                   text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 1, t_state, text_color=trend_color,
+                   text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_left)
+        table.merge_cells(tbl_left, 1, 1, 2, 1)
+
+        // ── Row 2: Description ───────────────────────────────────────────────
+        table.cell(tbl_left, 0, 2, "DESC", text_color=C_GRAY,
+                   text_size=sz_s, bgcolor=C_MID, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 2, t_description, text_color=C_WHITE,
+                   text_size=sz_s, bgcolor=C_MID, text_halign=text.align_left)
+        table.merge_cells(tbl_left, 1, 2, 2, 2)
+
+        // ── Row 3: Dwell ─────────────────────────────────────────────────────
+        dwell_str = "Bar " + str.tostring(t_dwell_bars) + " / avg " + str.tostring(math.round(t_dwell_avg, 1))
+        table.cell(tbl_left, 0, 3, "DWELL", text_color=C_GRAY,
+                   text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 3, dwell_str, text_color=dwell_color,
+                   text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)
+        table.merge_cells(tbl_left, 1, 3, 2, 3)
+
+        // ── Row 4: Next states header ────────────────────────────────────────
+        table.cell(tbl_left, 0, 4, "NEXT STATES", text_color=C_PURPLE,
+                   text_size=sz_b, bgcolor=color.new(C_PURPLE, 85), text_halign=text.align_left)
+        table.cell(tbl_left, 1, 4, "PROB", text_color=C_GRAY,
+                   text_size=sz_b, bgcolor=color.new(C_PURPLE, 85), text_halign=text.align_center)
+        table.cell(tbl_left, 2, 4, "EV", text_color=C_GRAY,
+                   text_size=sz_b, bgcolor=color.new(C_PURPLE, 85), text_halign=text.align_center)
+
+        // ── Row 5: Next state 1 ──────────────────────────────────────────────
+        prob1_str = str.tostring(math.round(t_prob1 * 100, 1)) + "%"
+        ev1_str   = (t_ev1 >= 0 ? "▲" : "▼") + str.tostring(math.round(math.abs(t_ev1), 2)) + "R"
+        table.cell(tbl_left, 0, 5, t_next1, text_color=prob_color(t_prob1),
+                   text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 5, prob1_str, text_color=prob_color(t_prob1),
+                   text_size=sz_b, bgcolor=color.new(prob_color(t_prob1), 80), text_halign=text.align_center)
+        table.cell(tbl_left, 2, 5, ev1_str, text_color=ev_color(t_ev1),
+                   text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 6: Next state 2 ──────────────────────────────────────────────
+        prob2_str = str.tostring(math.round(t_prob2 * 100, 1)) + "%"
+        ev2_str   = (t_ev2 >= 0 ? "▲" : "▼") + str.tostring(math.round(math.abs(t_ev2), 2)) + "R"
+        table.cell(tbl_left, 0, 6, t_next2, text_color=prob_color(t_prob2),
+                   text_size=sz_s, bgcolor=C_MID, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 6, prob2_str, text_color=prob_color(t_prob2),
+                   text_size=sz_b, bgcolor=color.new(prob_color(t_prob2), 85), text_halign=text.align_center)
+        table.cell(tbl_left, 2, 6, ev2_str, text_color=ev_color(t_ev2),
+                   text_size=sz_b, bgcolor=C_MID, text_halign=text.align_center)
+
+        // ── Row 7: Next state 3 ──────────────────────────────────────────────
+        prob3_str = str.tostring(math.round(t_prob3 * 100, 1)) + "%"
+        ev3_str   = (t_ev3 >= 0 ? "▲" : "▼") + str.tostring(math.round(math.abs(t_ev3), 2)) + "R"
+        table.cell(tbl_left, 0, 7, t_next3, text_color=prob_color(t_prob3),
+                   text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 7, prob3_str, text_color=prob_color(t_prob3),
+                   text_size=sz_b, bgcolor=color.new(prob_color(t_prob3), 85), text_halign=text.align_center)
+        table.cell(tbl_left, 2, 7, ev3_str, text_color=ev_color(t_ev3),
+                   text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 8: TEST watermark ────────────────────────────────────────────
+        table.cell(tbl_left, 0, 8, "⚠ HARDCODED TEST DATA — NOT LIVE", text_color=C_ORANGE,
+                   text_size=sz_s, bgcolor=color.new(C_ORANGE, 85), text_halign=text.align_center)
+        table.merge_cells(tbl_left, 0, 8, 2, 8)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RIGHT TABLE — Gate + Conviction panel
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table  tbl_right      = na
+var string prev_right_pos = ""
+
+if barstate.islast
+    if not i_show_right
+        if not na(tbl_right)
+            table.delete(tbl_right)
+            tbl_right      := na
+            prev_right_pos := ""
+    else
+        if i_right_pos != prev_right_pos or na(tbl_right)
+            if not na(tbl_right)
+                table.delete(tbl_right)
+            tbl_right      := table.new(pos_from_string(i_right_pos), 4, 13,
+                                bgcolor=C_BG, border_color=C_BORDER, border_width=1,
+                                frame_color=C_FRAME, frame_width=2)
+            prev_right_pos := i_right_pos
+
+        // ── Row 0: Gate header ───────────────────────────────────────────────
+        table.cell(tbl_right, 0, 0, "GATE",   text_color=C_GOLD, text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 0, "STATUS", text_color=C_GOLD, text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_center)
+        table.cell(tbl_right, 2, 0, "VALUE",  text_color=C_GOLD, text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 0, "NEED",   text_color=C_GOLD, text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_center)
+
+        // ── Row 1: Gate 1 — Markov Gap ───────────────────────────────────────
+        gap_val_str = str.tostring(math.round(t_g_markov_gap * 100, 1)) + "%"
+        table.cell(tbl_right, 0, 1, "Markov Gap",         text_color=C_WHITE,              text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 1, gate_icon(gate1_pass), text_color=gate_col(gate1_pass), text_size=sz_h, bgcolor=gate_bg(gate1_pass), text_halign=text.align_center)
+        table.cell(tbl_right, 2, 1, gap_val_str,           text_color=gate_col(gate1_pass), text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 1, "≥61%",                text_color=C_GRAY,               text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 2: Gate 2 — Persistence ─────────────────────────────────────
+        pers_val_str = str.tostring(math.round(t_g_persistence * 100, 1)) + "%"
+        table.cell(tbl_right, 0, 2, "Persistence",         text_color=C_WHITE,              text_size=sz_b, bgcolor=C_MID, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 2, gate_icon(gate2_pass), text_color=gate_col(gate2_pass), text_size=sz_h, bgcolor=gate_bg(gate2_pass), text_halign=text.align_center)
+        table.cell(tbl_right, 2, 2, pers_val_str,           text_color=gate_col(gate2_pass), text_size=sz_b, bgcolor=C_MID, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 2, "≥82%",                 text_color=C_GRAY,               text_size=sz_s, bgcolor=C_MID, text_halign=text.align_center)
+
+        // ── Row 3: Gate 3 — Vol Cap ──────────────────────────────────────────
+        vol_val_str = str.tostring(math.round(t_g_vol_cap, 2)) + "×"
+        table.cell(tbl_right, 0, 3, "Vol Cap",             text_color=C_WHITE,              text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 3, gate_icon(gate3_pass), text_color=gate_col(gate3_pass), text_size=sz_h, bgcolor=gate_bg(gate3_pass), text_halign=text.align_center)
+        table.cell(tbl_right, 2, 3, vol_val_str,            text_color=gate_col(gate3_pass), text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 3, "≤1.25×",              text_color=C_GRAY,               text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 4: Gate 4 — Hurst ────────────────────────────────────────────
+        hurst_val_str = str.tostring(math.round(t_g_hurst, 2))
+        table.cell(tbl_right, 0, 4, "Hurst",               text_color=C_WHITE,              text_size=sz_b, bgcolor=C_MID, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 4, gate_icon(gate4_pass), text_color=gate_col(gate4_pass), text_size=sz_h, bgcolor=gate_bg(gate4_pass), text_halign=text.align_center)
+        table.cell(tbl_right, 2, 4, hurst_val_str,          text_color=gate_col(gate4_pass), text_size=sz_b, bgcolor=C_MID, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 4, "≥0.50",               text_color=C_GRAY,               text_size=sz_s, bgcolor=C_MID, text_halign=text.align_center)
+
+        // ── Row 5: Gate 5 — Session ──────────────────────────────────────────
+        sess_need_str = gate5_pass ? "OK" : "WAIT"
+        table.cell(tbl_right, 0, 5, "Session",             text_color=C_WHITE,              text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_left)
+        table.cell(tbl_right, 1, 5, gate_icon(gate5_pass), text_color=gate_col(gate5_pass), text_size=sz_h, bgcolor=gate_bg(gate5_pass), text_halign=text.align_center)
+        table.cell(tbl_right, 2, 5, t_session,              text_color=gate_col(gate5_pass), text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 5, sess_need_str,          text_color=gate_col(gate5_pass), text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 6: All gates banner ──────────────────────────────────────────
+        gates_txt = all_gates ? "ALL GATES PASS" : "GATES FAILING"
+        gates_tc  = all_gates ? C_GREEN : C_RED
+        gates_bg  = all_gates ? color.new(C_GREEN, 50) : color.new(C_RED, 50)
+        table.cell(tbl_right, 0, 6, gates_txt, text_color=gates_tc,
+                   text_size=sz_b, bgcolor=gates_bg, text_halign=text.align_center)
+        table.merge_cells(tbl_right, 0, 6, 3, 6)
+
+        // ── Row 7: Conviction header ─────────────────────────────────────────
+        table.cell(tbl_right, 0, 7, "CONVICTION", text_color=C_GOLD,
+                   text_size=sz_b, bgcolor=C_HDR, text_halign=text.align_center)
+        table.merge_cells(tbl_right, 0, 7, 3, 7)
+
+        // ── Row 8: Conviction rating ─────────────────────────────────────────
+        table.cell(tbl_right, 0, 8, t_conviction, text_color=conv_color,
+                   text_size=size.large, bgcolor=color.new(conv_color, 65), text_halign=text.align_center)
+        table.merge_cells(tbl_right, 0, 8, 3, 8)
+
+        // ── Row 9: Pillar diamonds ───────────────────────────────────────────
+        p1 = t_pillars >= 1 ? "◆" : "◇"
+        p2 = t_pillars >= 2 ? "◆" : "◇"
+        p3 = t_pillars >= 3 ? "◆" : "◇"
+        p4 = t_pillars >= 4 ? "◆" : "◇"
+        pil_str = p1 + " " + p2 + " " + p3 + " " + p4 + "  " + str.tostring(t_pillars) + "/4 pillars"
+        table.cell(tbl_right, 0, 9, pil_str, text_color=conv_color,
+                   text_size=sz_b, bgcolor=color.new(conv_color, 85), text_halign=text.align_center)
+        table.merge_cells(tbl_right, 0, 9, 3, 9)
+
+        // ── Row 10: Stats labels ─────────────────────────────────────────────
+        table.cell(tbl_right, 0, 10, "WR",      text_color=C_GRAY, text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 1, 10, "EV",      text_color=C_GRAY, text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 2, 10, "Samples", text_color=C_GRAY, text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 10, "Stab",    text_color=C_GRAY, text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 11: Stats values ─────────────────────────────────────────────
+        wr_col   = t_hist_wr >= 0.60 ? C_GREEN : t_hist_wr >= 0.50 ? C_ORANGE : C_RED
+        ev_col2  = t_hist_ev > 0.3   ? C_GREEN : t_hist_ev < 0.0   ? C_RED    : C_ORANGE
+        samp_col = t_samples >= 30   ? C_WHITE : C_RED
+
+        wr_str   = str.tostring(math.round(t_hist_wr * 100, 1)) + "%"
+        ev_str   = (t_hist_ev >= 0 ? "+" : "") + str.tostring(math.round(t_hist_ev, 2)) + "R"
+        samp_str = str.tostring(t_samples)
+
+        table.cell(tbl_right, 0, 11, wr_str,   text_color=wr_col,   text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 1, 11, ev_str,   text_color=ev_col2,  text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 2, 11, samp_str, text_color=samp_col, text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+        table.cell(tbl_right, 3, 11, "—",      text_color=C_GRAY,   text_size=sz_b, bgcolor=C_CELL, text_halign=text.align_center)
+
+        // ── Row 12: TEST watermark ───────────────────────────────────────────
+        table.cell(tbl_right, 0, 12, "⚠ TEST DATA", text_color=C_ORANGE,
+                   text_size=sz_s, bgcolor=color.new(C_ORANGE, 85), text_halign=text.align_center)
+        table.merge_cells(tbl_right, 0, 12, 3, 12)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DWELL COUNTER LABEL
+// ═══════════════════════════════════════════════════════════════════════════
+
+var label lbl_dwell = na
+label.delete(lbl_dwell[1])
+
+if i_show_dwell and barstate.islast
+    dwell_lbl_str = "In state: " + str.tostring(t_dwell_bars) + " bars (avg " + str.tostring(math.round(t_dwell_avg, 1)) + ")  [TEST]"
+    lbl_dwell := label.new(bar_index, high, dwell_lbl_str,
+                  style=label.style_label_lower_right,
+                  color=color.new(dwell_color, 70),
+                  textcolor=C_WHITE,
+                  size=sz_s)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BACKGROUND TINT
+// ═══════════════════════════════════════════════════════════════════════════
+
+bg_tint = t_conviction == "A+" ? color.new(C_GOLD,   97) :
+          t_conviction == "A"  ? color.new(C_GREEN,  97) :
+          t_conviction == "B"  ? color.new(C_ORANGE, 97) :
+                                 color.new(C_RED,    99)
+
+if i_show_bg_tint and all_gates
+    bgcolor(bg_tint, title="Conviction background tint")
+
+plot(na, title="H2 State Overlay TEST — hardcoded data, not live")

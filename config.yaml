@@ -1,0 +1,229 @@
+system:
+  name: H2_Quant_v1
+  timezone_local: Africa/Johannesburg   # SAST = UTC+2
+  log_level: INFO
+
+# ── Instruments ──────────────────────────────────────────────────────────────
+instruments:
+  tier1:         [US30, GBPUSD, DE40, XAUUSD, GBPJPY, EURJPY]
+  tier2:         [EURUSD, USDJPY, USTEC, UK100, AUDUSD, USDCAD]
+  discretionary: [JP225, HK50, XAGUSD]
+  excluded:      [AUS200]
+  # Legacy keys kept for Phase 1-5 compatibility
+  primary:       [JP225, DE40, UK100, USTEC, US30, HK50]
+  forex:         [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURJPY, GBPJPY, XAUUSD, XAGUSD]
+
+# ── MT5 connection ────────────────────────────────────────────────────────────
+mt5:
+  login:       52810633
+  password:    "4gDCP5hP1@wqxV"
+  server:      "ICMarketsSC-Demo"
+  path:        "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
+  broker:      "IC Markets"
+  account_type: "demo"
+  symbol_map:
+    JP225:  "JP225"
+    DE40:   "DE40Cash"
+    UK100:  "UK100"
+    USTEC:  "USTEC"
+    US30:   "US30"
+    HK50:   "HK50"
+    EURUSD: "EURUSD"
+    GBPUSD: "GBPUSD"
+    USDJPY: "USDJPY"
+    AUDUSD: "AUDUSD"
+    USDCAD: "USDCAD"
+    EURJPY: "EURJPY"
+    GBPJPY: "GBPJPY"
+    XAUUSD: "XAUUSD"
+    XAGUSD: "XAGUSD"
+  timeframe_map:
+    "1m":  1
+    "5m":  5
+    "15m": 15
+    "1H":  16385
+    "4H":  16388
+    "D":   16408
+  default_bars: 5000
+
+# ── MetaAPI ───────────────────────────────────────────────────────────────────
+metaapi:
+  account_id: "ef07b443-d678-4830-8941-8ab853504970"
+  region:     "london"
+  token:      ""   # stored in Railway env var METAAPI_TOKEN — never hardcode
+  # If trades stop executing: refresh token at metaapi.cloud
+
+# ── yfinance fallback ─────────────────────────────────────────────────────────
+yfinance:
+  ticker_map:
+    JP225:  "^N225"
+    DE40:   "^GDAXI"
+    UK100:  "^FTSE"
+    USTEC:  "^IXIC"
+    US30:   "^DJI"
+    HK50:   "^HSI"
+    EURUSD: "EURUSD=X"
+    GBPUSD: "GBPUSD=X"
+    USDJPY: "USDJPY=X"
+    AUDUSD: "AUDUSD=X"
+    USDCAD: "USDCAD=X"
+    EURJPY: "EURJPY=X"
+    GBPJPY: "GBPJPY=X"
+    XAUUSD: "GC=F"
+    XAGUSD: "SI=F"
+  timeframe_map:
+    "1m":  "1m"
+    "5m":  "5m"
+    "15m": "15m"
+    "1H":  "1h"
+    "4H":  "4h"
+    "D":   "1d"
+  default_period: "2y"
+
+# ── Stooq tertiary fallback (daily only) ─────────────────────────────────────
+stooq:
+  base_url: "https://stooq.com/q/d/l/"
+  ticker_map:
+    JP225:  "^NKX"
+    DE40:   "^DAX"
+    UK100:  "^UKX"
+    USTEC:  "^NDX"
+    US30:   "^DJI"
+    EURUSD: "EURUSD"
+    XAUUSD: "^XAU"
+
+# ── Timeframes ────────────────────────────────────────────────────────────────
+timeframes:
+  research:  [D, 4H, 1H, 15m]
+  live:      5m
+  reference: [1H, 4H]
+
+# ── File paths ────────────────────────────────────────────────────────────────
+paths:
+  data_raw:       "data/raw"
+  data_processed: "data/processed"
+  features:       "features"
+  states:         "states"
+  outputs:        "outputs"
+  logs:           "logs"
+
+# ── Session windows (UTC) ─────────────────────────────────────────────────────
+sessions:
+  tokyo:   { start_utc: "00:00", end_utc: "09:00" }
+  london:  { start_utc: "07:00", end_utc: "16:00" }
+  ny:      { start_utc: "13:00", end_utc: "22:00" }
+  overlap: { start_utc: "13:00", end_utc: "16:00" }
+
+# ── Session gates — valid trading sessions per instrument ─────────────────────
+session_gates:
+  US30:   [NY]
+  GBPUSD: [LONDON, NY]
+  DE40:   [LONDON]
+  UK100:  [LONDON]
+  XAUUSD: [LONDON, NY]
+  GBPJPY: [LONDON, NY]
+  EURJPY: [LONDON, NY]
+  EURUSD: [LONDON, NY]
+  USDJPY: [LONDON, NY]
+  AUDUSD: [LONDON, NY]
+  USDCAD: [LONDON, NY]
+  USTEC:  [NY]
+  JP225:  [TOKYO, LONDON]
+  HK50:   [TOKYO]
+  XAGUSD: [LONDON, NY]
+
+# ── Markov gates ──────────────────────────────────────────────────────────────
+gates:
+  markov_gap_threshold:         0.11   # top state must lead 2nd by >= 11pp
+  markov_gap_min_probability:   0.61   # top state must be >= 61%
+  markov_persistence_threshold: 0.82   # self-transition >= 82%
+  volatility_cap_multiplier:    1.25   # ATR <= 1.25x GK reference
+  hurst_threshold:              0.50   # Hurst >= 0.50
+
+# ── Statistics ────────────────────────────────────────────────────────────────
+statistics:
+  min_samples:       30
+  oos_fraction:      0.20
+  monte_carlo_paths: 10000
+  confidence_level:  0.95
+
+# ── Feature engineering parameters ───────────────────────────────────────────
+features:
+  rsi_period:          14
+  macd_fast:           12
+  macd_slow:           26
+  macd_signal:         9
+  williams_r_period:   14
+  cci_period:          20
+  ema_periods:         [21, 50, 200]
+  atr_period:          14
+  bb_period:           20
+  bb_stddev:           2
+  volume_avg_period:   20
+  hurst_period:        50
+  efficiency_period:   10
+  fractal_lookback:    5
+  vwf_period:          22
+  vwf_smoothing:       9
+  dxy_proxy:           "USDJPY"
+  atr_percentile_bars: 50
+
+# ── Live monitor ──────────────────────────────────────────────────────────────
+monitor:
+  interval_seconds:              300     # 5-minute loop
+  dry_run:                       true    # set false to fire live webhooks
+  live_timeframe:                "1H"   # timeframe for live classification
+  lookback_bars:                 300    # bars per cycle
+  session_matrix_min_transitions: 200   # min transitions to use session matrix
+
+# ── Webhook — Railway bridge ──────────────────────────────────────────────────
+webhook:
+  railway_url:    "https://h2-webhook-bridge-production.up.railway.app/webhook/tradingview"
+  webhook_secret: "H2_SUPER_SECRET_2026"
+  timeout_seconds: 10
+  retry_attempts:  3
+  dry_run:         true   # master override — set false for live execution
+
+# ── WhatsApp — CallMeBot ──────────────────────────────────────────────────────
+whatsapp:
+  provider:        "callmebot"
+  phone:           "27614056155"
+  apikey:          "2096445"
+  url:             "https://api.callmebot.com/whatsapp.php"
+  enabled:         true
+  timeout_seconds: 15
+
+# ── Prop trading risk controls ────────────────────────────────────────────────
+prop:
+  daily_loss_limit:    -3.0    # halt if daily P&L < -3R
+  max_open_trades:     3
+  reduced_size:        0.05    # lots during drawdown
+  normal_size:         0.10
+  news_buffer_minutes: 30
+
+# ── Sharpe filter for Markov signal quality ───────────────────────────────────
+sharpe_minimums:
+  tier1_minimum:  5.0
+  tier2_minimum:  3.0
+  exclude_below:  2.0
+
+# ── Users / fan-out ───────────────────────────────────────────────────────────
+users:
+  - name:          "primary"
+    metaapi_id:    "ef07b443-d678-4830-8941-8ab853504970"
+    whatsapp:      "27614056155"
+    tier:          "full"      # full = webhook + whatsapp
+    prop_mode:     false
+    active:        true
+
+# ── GitHub / Railway ─────────────────────────────────────────────────────────
+github:
+  repo:         "https://github.com/Hennieh22/h2-webhook-bridge"
+  dashboard:    "https://h2-webhook-bridge-production.up.railway.app/"
+  health_check: "https://h2-webhook-bridge-production.up.railway.app/health"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level:      INFO
+  directory:  "logs/"
+  signal_log: "outputs/H2_signal_log.csv"

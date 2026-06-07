@@ -1,0 +1,292 @@
+// H2 State Overlay v1.0 — TEST VERSION (hardcoded values)
+// H2 Systematic Trading
+// © 2026 H2 Quant Systems
+//
+// Paste this into TradingView → Pine Editor → Add to chart
+// to verify the display layout before connecting live data.
+//
+// Test scenario:
+//   Instrument : JP225
+//   State      : BULL_STRONG_HIGH_ABOVE_NY_BOS_OB
+//   All 5 gates: PASS
+//   Conviction : A+  |  4/4 pillars
+//   WR: 71%  EV: 1.8R  Samples: 847
+
+//@version=5
+indicator("H2 State Overlay [EURJPY]", overlay=true,
+          max_boxes_count=10, max_lines_count=50, max_labels_count=500,
+          shorttitle="H2-EURJPY")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HARDCODED TEST DATA — replace with input.* calls in production version
+// ═══════════════════════════════════════════════════════════════════════════
+
+i_state       = ""
+i_description = "EURJPY: neutral with weak momentum (high vol, break of structure, RSI oversold, OFFHOURS). Wait for fractal HL on retrac"
+i_session     = "TOKYO"
+i_sast_time   = "04:15"
+i_dwell_bars  = 1
+i_dwell_avg   = 1.4
+
+i_next1       = ""
+i_prob1       = 0.0
+i_ev1         = 0.0
+
+i_next2       = "BULL_STRONG_HIGH_ABOVE_NY_BOS_OB"
+i_prob2       = 0.0
+i_ev2         = 0.0
+
+i_next3       = ""
+i_prob3       = 0.0
+i_ev3         = 0.0
+
+i_g_markov_gap  = 0.0
+i_g_persistence = 0.0
+i_g_vol_cap     = 1.4963
+i_g_hurst       = 1.0
+i_g_session_ok  = false
+
+i_conviction  = "SKIP"
+i_pillars     = 0
+i_hist_wr     = 0.0
+i_hist_ev     = 0.0
+i_samples     = 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COLOR PALETTE  (identical to production)
+// ═══════════════════════════════════════════════════════════════════════════
+
+C_GREEN    = #26a69a
+C_RED      = #ef5350
+C_ORANGE   = #ff9800
+C_GRAY     = #787b86
+C_PURPLE   = #7c4dff
+C_GOLD     = #ffd700
+C_WHITE    = #ffffff
+C_BG_DARK  = color.new(#0d1117, 10)
+C_BG_MID   = color.new(#161b22, 15)
+C_BG_CELL  = color.new(#1c2128, 20)
+
+// ── Derived ───────────────────────────────────────────────────────────────
+gate1_pass = i_g_markov_gap  >= 0.61
+gate2_pass = i_g_persistence >= 0.82
+gate3_pass = i_g_vol_cap     <= 1.25
+gate4_pass = i_g_hurst       >= 0.50
+gate5_pass = i_g_session_ok
+all_gates  = gate1_pass and gate2_pass and gate3_pass and gate4_pass and gate5_pass
+
+conv_color = i_conviction == "A+" ? C_GOLD   :
+             i_conviction == "A"  ? C_GREEN  :
+             i_conviction == "B"  ? C_ORANGE : C_RED
+
+dwell_pct   = i_dwell_avg > 0 ? i_dwell_bars / i_dwell_avg : 0.0
+dwell_color = dwell_pct >= 0.9 ? C_ORANGE :
+              dwell_pct >= 0.6 ? color.new(C_ORANGE, 60) : C_GRAY
+
+trend_color = #26a69a   // BULL → green
+
+prob_color(p) =>
+    p >= 0.60 ? C_GREEN : p >= 0.40 ? C_ORANGE : C_GRAY
+
+ev_color(e) =>
+    e > 0.3 ? C_GREEN : e < 0 ? C_RED : C_GRAY
+
+gate_icon(pass) => pass ? "✓" : "✗"
+gate_bg(pass)   => pass ? color.new(C_GREEN, 70) : color.new(C_RED, 70)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL 1 + 2 — LEFT TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table tbl_left = table.new(
+     position.top_left, columns=3, rows=16,
+     bgcolor=C_BG_DARK, border_color=color.new(C_GRAY, 60), border_width=1,
+     frame_color=color.new(C_PURPLE, 20), frame_width=2)
+
+if barstate.islast
+
+    table.cell(tbl_left, 0, 0, "H2 QUANT", text_color=C_GOLD,
+               text_size=size.normal, bgcolor=color.new(#0d1117, 5),
+               text_halign=text.align_left)
+    table.cell(tbl_left, 1, 0, "LIVE STATE", text_color=C_GOLD,
+               text_size=size.normal, bgcolor=color.new(#0d1117, 5))
+    table.merge_cells(tbl_left, 0, 0, 1, 0)
+
+    table.cell(tbl_left, 2, 0, i_session + "  " + i_sast_time + " SAST",
+               text_color=C_GRAY, text_size=size.small,
+               bgcolor=color.new(#0d1117, 5), text_halign=text.align_right)
+
+    table.cell(tbl_left, 0, 1, "STATE", text_color=C_GRAY,
+               text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 1, i_state, text_color=trend_color,
+               text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.merge_cells(tbl_left, 1, 1, 2, 1)
+
+    table.cell(tbl_left, 0, 2, "DESC", text_color=C_GRAY,
+               text_size=size.tiny, bgcolor=C_BG_MID, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 2, i_description, text_color=C_WHITE,
+               text_size=size.tiny, bgcolor=C_BG_MID, text_halign=text.align_left)
+    table.merge_cells(tbl_left, 1, 2, 2, 2)
+
+    dwell_str = "Bar " + str.tostring(i_dwell_bars) + " / avg " + str.tostring(math.round(i_dwell_avg, 1))
+    table.cell(tbl_left, 0, 3, "DWELL", text_color=C_GRAY,
+               text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 3, dwell_str, text_color=dwell_color,
+               text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.merge_cells(tbl_left, 1, 3, 2, 3)
+
+    table.cell(tbl_left, 0, 4, "NEXT STATES", text_color=C_PURPLE,
+               text_size=size.small, bgcolor=color.new(C_PURPLE, 85),
+               text_halign=text.align_left)
+    table.cell(tbl_left, 1, 4, "PROB", text_color=C_GRAY,
+               text_size=size.small, bgcolor=color.new(C_PURPLE, 85),
+               text_halign=text.align_center)
+    table.cell(tbl_left, 2, 4, "EV", text_color=C_GRAY,
+               text_size=size.small, bgcolor=color.new(C_PURPLE, 85),
+               text_halign=text.align_center)
+
+    table.cell(tbl_left, 0, 5, i_next1, text_color=prob_color(i_prob1),
+               text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 5, str.tostring(math.round(i_prob1 * 100, 1)) + "%",
+               text_color=prob_color(i_prob1), text_size=size.small,
+               bgcolor=color.new(prob_color(i_prob1), 80), text_halign=text.align_center)
+    table.cell(tbl_left, 2, 5, "▲" + str.tostring(math.round(i_ev1, 2)) + "R",
+               text_color=ev_color(i_ev1), text_size=size.small,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+    table.cell(tbl_left, 0, 6, i_next2, text_color=prob_color(i_prob2),
+               text_size=size.tiny, bgcolor=C_BG_MID, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 6, str.tostring(math.round(i_prob2 * 100, 1)) + "%",
+               text_color=prob_color(i_prob2), text_size=size.small,
+               bgcolor=color.new(prob_color(i_prob2), 85), text_halign=text.align_center)
+    table.cell(tbl_left, 2, 6, "▲" + str.tostring(math.round(i_ev2, 2)) + "R",
+               text_color=ev_color(i_ev2), text_size=size.small,
+               bgcolor=C_BG_MID, text_halign=text.align_center)
+
+    table.cell(tbl_left, 0, 7, i_next3, text_color=prob_color(i_prob3),
+               text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_left, 1, 7, str.tostring(math.round(i_prob3 * 100, 1)) + "%",
+               text_color=prob_color(i_prob3), text_size=size.small,
+               bgcolor=color.new(prob_color(i_prob3), 85), text_halign=text.align_center)
+    table.cell(tbl_left, 2, 7, "▼" + str.tostring(math.round(math.abs(i_ev3), 2)) + "R",
+               text_color=ev_color(i_ev3), text_size=size.small,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL 3 + 4 — RIGHT TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table tbl_right = table.new(
+     position.top_right, columns=4, rows=14,
+     bgcolor=C_BG_DARK, border_color=color.new(C_GRAY, 60), border_width=1,
+     frame_color=color.new(C_PURPLE, 20), frame_width=2)
+
+if barstate.islast
+
+    table.cell(tbl_right, 0, 0, "GATE", text_color=C_GOLD, text_size=size.small,
+               bgcolor=color.new(#0d1117, 5), text_halign=text.align_left)
+    table.cell(tbl_right, 1, 0, "STATUS", text_color=C_GOLD, text_size=size.small,
+               bgcolor=color.new(#0d1117, 5), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 0, "VALUE", text_color=C_GOLD, text_size=size.small,
+               bgcolor=color.new(#0d1117, 5), text_halign=text.align_center)
+    table.cell(tbl_right, 3, 0, "NEED", text_color=C_GOLD, text_size=size.small,
+               bgcolor=color.new(#0d1117, 5), text_halign=text.align_center)
+
+    // Gate 1
+    table.cell(tbl_right, 0, 1, "Markov Gap", text_color=C_WHITE, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_right, 1, 1, gate_icon(gate1_pass), text_color=C_GREEN,
+               text_size=size.normal, bgcolor=gate_bg(gate1_pass), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 1, str.tostring(math.round(i_g_markov_gap * 100, 1)) + "%",
+               text_color=C_GREEN, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 1, "≥61%", text_color=C_GRAY, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+    // Gate 2
+    table.cell(tbl_right, 0, 2, "Persistence", text_color=C_WHITE, text_size=size.tiny,
+               bgcolor=C_BG_MID, text_halign=text.align_left)
+    table.cell(tbl_right, 1, 2, gate_icon(gate2_pass), text_color=C_GREEN,
+               text_size=size.normal, bgcolor=gate_bg(gate2_pass), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 2, str.tostring(math.round(i_g_persistence * 100, 1)) + "%",
+               text_color=C_GREEN, text_size=size.tiny, bgcolor=C_BG_MID, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 2, "≥82%", text_color=C_GRAY, text_size=size.tiny,
+               bgcolor=C_BG_MID, text_halign=text.align_center)
+
+    // Gate 3
+    table.cell(tbl_right, 0, 3, "Vol Cap", text_color=C_WHITE, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_right, 1, 3, gate_icon(gate3_pass), text_color=C_GREEN,
+               text_size=size.normal, bgcolor=gate_bg(gate3_pass), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 3, str.tostring(math.round(i_g_vol_cap, 2)) + "×",
+               text_color=C_GREEN, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 3, "≤1.25×", text_color=C_GRAY, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+    // Gate 4
+    table.cell(tbl_right, 0, 4, "Hurst", text_color=C_WHITE, text_size=size.tiny,
+               bgcolor=C_BG_MID, text_halign=text.align_left)
+    table.cell(tbl_right, 1, 4, gate_icon(gate4_pass), text_color=C_GREEN,
+               text_size=size.normal, bgcolor=gate_bg(gate4_pass), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 4, str.tostring(math.round(i_g_hurst, 2)),
+               text_color=C_GREEN, text_size=size.tiny, bgcolor=C_BG_MID, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 4, "≥0.50", text_color=C_GRAY, text_size=size.tiny,
+               bgcolor=C_BG_MID, text_halign=text.align_center)
+
+    // Gate 5
+    table.cell(tbl_right, 0, 5, "Session", text_color=C_WHITE, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_left)
+    table.cell(tbl_right, 1, 5, gate_icon(gate5_pass), text_color=C_GREEN,
+               text_size=size.normal, bgcolor=gate_bg(gate5_pass), text_halign=text.align_center)
+    table.cell(tbl_right, 2, 5, i_session, text_color=C_GREEN, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 5, "OK", text_color=C_GREEN, text_size=size.tiny,
+               bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+    // All gates banner
+    table.cell(tbl_right, 0, 6, "ALL GATES PASS", text_color=C_GREEN,
+               text_size=size.small, bgcolor=color.new(C_GREEN, 50), text_halign=text.align_center)
+    table.merge_cells(tbl_right, 0, 6, 3, 6)
+
+    // Conviction
+    table.cell(tbl_right, 0, 7, "CONVICTION", text_color=C_GOLD,
+               text_size=size.small, bgcolor=color.new(#0d1117, 5), text_halign=text.align_center)
+    table.merge_cells(tbl_right, 0, 7, 3, 7)
+
+    table.cell(tbl_right, 0, 8, i_conviction, text_color=C_GOLD,
+               text_size=size.large, bgcolor=color.new(C_GOLD, 65), text_halign=text.align_center)
+    table.merge_cells(tbl_right, 0, 8, 3, 8)
+
+    table.cell(tbl_right, 0, 9, "◆ ◆ ◆ ◆  4/4 pillars", text_color=C_GOLD,
+               text_size=size.small, bgcolor=color.new(C_GOLD, 85), text_halign=text.align_center)
+    table.merge_cells(tbl_right, 0, 9, 3, 9)
+
+    // Stats header
+    table.cell(tbl_right, 0, 10, "WR",      text_color=C_GRAY, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 1, 10, "EV",      text_color=C_GRAY, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 2, 10, "Samples", text_color=C_GRAY, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 10, "Stab",    text_color=C_GRAY, text_size=size.tiny, bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+    table.cell(tbl_right, 0, 11, str.tostring(math.round(i_hist_wr * 100, 1)) + "%",
+               text_color=C_GREEN, text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 1, 11, "+" + str.tostring(math.round(i_hist_ev, 2)) + "R",
+               text_color=C_GREEN, text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 2, 11, str.tostring(i_samples),
+               text_color=C_WHITE, text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_center)
+    table.cell(tbl_right, 3, 11, "0.84",
+               text_color=C_GREEN, text_size=size.small, bgcolor=C_BG_CELL, text_halign=text.align_center)
+
+// ── Dwell counter label ───────────────────────────────────────────────────
+var label lbl_dwell = na
+label.delete(lbl_dwell[1])
+if barstate.islast
+    lbl_dwell := label.new(bar_index, high,
+         "In state: " + str.tostring(i_dwell_bars) + " bars  (avg " +
+         str.tostring(math.round(i_dwell_avg, 1)) + ")",
+         style=label.style_label_lower_right,
+         color=color.new(dwell_color, 70),
+         textcolor=C_WHITE, size=size.small)
+
+// ── Background tint (gold/green for A+, all gates passing) ────────────────
+bgcolor(color.new(C_GOLD, 97), title="A+ conviction background")
+
+plot(na, title="H2 State Overlay TEST — display only")

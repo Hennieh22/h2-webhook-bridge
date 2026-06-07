@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Data files (large binaries — regenerate from MT5/yfinance)
+data/processed/
+data/raw/
+features/*.parquet
+states/*.parquet
+
+# Outputs (generated at runtime)
+outputs/
+logs/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Claude local settings
+.claude/settings.local.json
