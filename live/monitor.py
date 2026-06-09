@@ -570,6 +570,80 @@ def update_outcome(instrument: str, state_id: str, outcome_r: float):
 
 
 # ---------------------------------------------------------------------------
+# MT5 startup health check
+# ---------------------------------------------------------------------------
+
+def mt5_health_check(dry_run: bool = True) -> bool:
+    """
+    Verify MT5 is running and the account is connected.
+    Returns True immediately if connected.
+    If not connected:
+      - logs the error
+      - sends a WhatsApp alert (once per attempt, not spammy)
+      - retries every 60 seconds indefinitely
+      - only returns True once a live connection is confirmed
+    """
+    import MetaTrader5 as mt5
+
+    MT5_LOGIN    = CFG["mt5"].get("login")
+    MT5_PASSWORD = CFG["mt5"].get("password", "")
+    MT5_SERVER   = CFG["mt5"].get("server", "")
+
+    retry_interval = 60   # seconds between retry attempts
+    alert_sent     = False
+
+    while True:
+        connected = False
+        try:
+            if MT5_LOGIN and MT5_PASSWORD and MT5_SERVER:
+                connected = mt5.initialize(
+                    login=int(MT5_LOGIN),
+                    password=MT5_PASSWORD,
+                    server=MT5_SERVER,
+                )
+            else:
+                connected = mt5.initialize()
+
+            if connected:
+                info = mt5.account_info()
+                mt5.shutdown()
+                if info is not None:
+                    log.info(
+                        f"MT5 connected — account {info.login} "
+                        f"({info.server}) balance={info.balance:.2f}"
+                    )
+                    return True
+                else:
+                    connected = False
+                    mt5.shutdown()
+            else:
+                err = mt5.last_error()
+                log.error(f"MT5 initialize() failed: {err}")
+                mt5.shutdown()
+
+        except Exception as exc:
+            log.error(f"MT5 health check exception: {exc}")
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
+        # ── Not connected ────────────────────────────────────────────────────
+        log.error("MT5 not connected. Waiting 60 s before retry …")
+
+        if not alert_sent:
+            alert_msg = (
+                "⚠️ H2 Monitor — MT5 not connected.\n"
+                "Start the MT5 terminal (ICMarketsSC-Demo).\n"
+                "Monitor is paused and will retry every 60 seconds."
+            )
+            send_whatsapp(alert_msg, dry_run=dry_run)
+            alert_sent = True   # only send once; don't spam on every retry
+
+        time.sleep(retry_interval)
+
+
+# ---------------------------------------------------------------------------
 # Signal log writer
 # ---------------------------------------------------------------------------
 
@@ -867,6 +941,11 @@ if __name__ == "__main__":
         insts = [args.instrument]
     elif args.tier1:
         insts = TIER1
+
+    # ── MT5 health check — must pass before any cycle runs ───────────────────
+    log.info("Checking MT5 connectivity …")
+    mt5_health_check(dry_run=dry_run)
+    log.info("MT5 confirmed connected. Starting monitor.")
 
     ensure_signal_log()
 
