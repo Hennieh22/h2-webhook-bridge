@@ -18,17 +18,9 @@ indicator("H2 State Overlay v1.2", overlay=true,
 
 var G_LAYOUT = "── Layout & Appearance ──"
 
-i_left_pos = input.string("Top Left", "Left Panel Position",
-    options=["Top Left","Top Center","Top Right",
-             "Middle Left","Middle Center","Middle Right",
-             "Bottom Left","Bottom Center","Bottom Right"],
-    group=G_LAYOUT)
+i_left_pos = input.string("Top Left", "Left Panel Position", options=["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"], group=G_LAYOUT)
 
-i_right_pos = input.string("Top Right", "Right Panel Position",
-    options=["Top Left","Top Center","Top Right",
-             "Middle Left","Middle Center","Middle Right",
-             "Bottom Left","Bottom Center","Bottom Right"],
-    group=G_LAYOUT)
+i_right_pos = input.string("Top Right", "Right Panel Position", options=["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"], group=G_LAYOUT)
 
 i_text_header = input.string("Normal", "Header Text Size",
     options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
