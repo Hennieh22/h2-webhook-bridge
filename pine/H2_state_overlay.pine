@@ -22,20 +22,11 @@ i_left_pos = input.string("Top Left", "Left Panel Position", options=["Top Left"
 
 i_right_pos = input.string("Top Right", "Right Panel Position", options=["Top Left","Top Center","Top Right","Middle Left","Middle Center","Middle Right","Bottom Left","Bottom Center","Bottom Right"], group=G_LAYOUT)
 
-i_text_header = input.string("Normal", "Header Text Size",
-    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
-
-i_text_body = input.string("Small", "Body Text Size",
-    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
-
-i_text_stats = input.string("Tiny", "Stats Text Size",
-    options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
-
-i_theme = input.string("Black", "Theme",
-    options=["Black","Dark","Midnight","Charcoal"], group=G_LAYOUT)
-
-i_opacity = input.int(10, "Panel Transparency %",
-    minval=0, maxval=90, step=5, group=G_LAYOUT)
+i_text_header = input.string("Normal", "Header Text Size", options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+i_text_body   = input.string("Small",  "Body Text Size",   options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+i_text_stats  = input.string("Tiny",   "Stats Text Size",  options=["Tiny","Small","Normal","Large","Huge"], group=G_LAYOUT)
+i_theme       = input.string("Black",  "Theme",            options=["Black","Dark","Midnight","Charcoal"],   group=G_LAYOUT)
+i_opacity     = input.int(10, "Panel Transparency %", minval=0, maxval=90, step=5, group=G_LAYOUT)
 
 i_show_left    = input.bool(true,  "Show State Panel (Left)",    group=G_LAYOUT)
 i_show_right   = input.bool(true,  "Show Gate Panel (Right)",    group=G_LAYOUT)
