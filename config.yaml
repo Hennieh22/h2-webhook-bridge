@@ -171,7 +171,7 @@ features:
 # ── Live monitor ──────────────────────────────────────────────────────────────
 monitor:
   interval_seconds:              300     # 5-minute loop
-  dry_run:                       true    # set false to fire live webhooks
+  dry_run:                       false   # LIVE — webhooks and WhatsApp active
   live_timeframe:                "1H"   # timeframe for live classification
   lookback_bars:                 300    # bars per cycle
   session_matrix_min_transitions: 200   # min transitions to use session matrix
@@ -182,7 +182,7 @@ webhook:
   webhook_secret: "H2_SUPER_SECRET_2026"
   timeout_seconds: 10
   retry_attempts:  3
-  dry_run:         true   # master override — set false for live execution
+  dry_run:         false  # LIVE — master override active
 
 # ── WhatsApp — CallMeBot ──────────────────────────────────────────────────────
 whatsapp:
