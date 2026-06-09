@@ -364,9 +364,8 @@ if state_changed and not barstate.isfirst
 // BACKGROUND TINT
 // ═══════════════════════════════════════════════════════════════════════════
 
-bg_tint = i_conviction == "A+" ? color.new(C_GOLD, 97) : i_conviction == "A" ? color.new(C_GREEN, 97) : i_conviction == "B" ? color.new(C_ORANGE, 97) : color.new(C_RED, 99)
-
-if i_show_bg_tint and all_gates
-    bgcolor(bg_tint, title="Conviction background tint")
+bg_tint_base  = i_conviction == "A+" ? color.new(C_GOLD, 97) : i_conviction == "A" ? color.new(C_GREEN, 97) : i_conviction == "B" ? color.new(C_ORANGE, 97) : color.new(C_RED, 99)
+bg_tint_final = (i_show_bg_tint and all_gates) ? bg_tint_base : color.new(color.black, 100)
+bgcolor(bg_tint_final, title="Conviction background tint")
 
 plot(na, title="H2 State Overlay - display only")
