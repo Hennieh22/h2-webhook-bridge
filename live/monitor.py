@@ -611,6 +611,64 @@ def update_outcome(instrument: str, state_id: str, outcome_r: float):
 
 
 # ---------------------------------------------------------------------------
+# ngrok URL detection — called once at startup
+# ---------------------------------------------------------------------------
+
+def _get_ngrok_url() -> str | None:
+    """
+    Query ngrok's local API (localhost:4040) to find the current HTTPS tunnel URL.
+    Returns the URL string, or None if ngrok is not running.
+    """
+    import urllib.request as _ur
+    try:
+        with _ur.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
+            data = json.loads(r.read())
+        for tunnel in data.get("tunnels", []):
+            if tunnel.get("proto") == "https":
+                return tunnel["public_url"]
+        tunnels = data.get("tunnels", [])
+        if tunnels:
+            return tunnels[0].get("public_url")
+    except Exception:
+        pass
+    return None
+
+
+def _print_ngrok_banner():
+    """
+    Print a clearly visible startup banner with the current ngrok public URL.
+    This URL is what you paste into the Pine Script i_ngrok_url input.
+    """
+    url = _get_ngrok_url()
+    line = "=" * 72
+    if url:
+        pine_url = url + "/api/live-state/US30"
+        print(line)
+        print("  H2 DASHBOARD — PUBLIC URL DETECTED")
+        print(line)
+        print(f"  ngrok URL  :  {url}")
+        print(f"  Dashboard  :  {url}/")
+        print(f"  Pine test  :  {pine_url}")
+        print()
+        print("  PINE SCRIPT SETUP:")
+        print("  Settings -> Data Source -> Dashboard URL (ngrok)")
+        print(f"  Paste:  {url}")
+        print(line)
+    else:
+        print(line)
+        print("  H2 DASHBOARD — ngrok NOT DETECTED")
+        print(line)
+        print("  Dashboard is running locally only (localhost:5050)")
+        print("  To expose publicly for Pine Script:")
+        print("    1. Download ngrok from ngrok.com")
+        print("    2. Run: ngrok config add-authtoken YOUR_TOKEN")
+        print("    3. Run: ngrok http 5050")
+        print("    4. Copy the https://... URL into Pine Script inputs")
+        print(line)
+    print()
+
+
+# ---------------------------------------------------------------------------
 # MT5 startup health check
 # ---------------------------------------------------------------------------
 
@@ -1028,6 +1086,9 @@ if __name__ == "__main__":
         insts = [args.instrument]
     elif args.tier1:
         insts = TIER1
+
+    # ── ngrok URL detection — print public URL for Pine Script ───────────────
+    _print_ngrok_banner()
 
     # ── MT5 health check — must pass before any cycle runs ───────────────────
     log.info("Checking MT5 connectivity …")

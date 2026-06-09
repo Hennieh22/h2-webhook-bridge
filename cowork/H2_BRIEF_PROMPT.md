@@ -1,9 +1,63 @@
 # H2 SESSION BRIEF — Claude Cowork Instructions
-*H2 Quant System v1 · Cowork Prompt v2.0*
+*H2 Quant System v1 · Cowork Prompt v2.1*
 
 ---
 
-## Trigger
+## Quick Commands
+
+### `H2 Go`
+
+When the user types **H2 Go**:
+
+1. **Tell them to launch the system:**
+   > "Double-click **H2_GO.bat** on your Desktop (or in `C:\Users\Admin\Desktop\H2_QUANT_V1\`).
+   > This opens 5 windows automatically:
+   > - **H2 Monitor** — live classification cycle (every 5 min)
+   > - **H2 Dashboard** — http://192.168.101.245:5050 (phone-friendly)
+   > - **H2 Tunnel** — ngrok public URL for Pine Script
+   > - **H2 TV Bridge** — pushes state to TradingView loop
+   > - **H2 Brief** — generates today's session brief"
+
+2. **Tell them what to do in TradingView:**
+   > "Once the **H2 Tunnel** window shows a `https://` URL:
+   > - Open TradingView → H2 State Overlay settings
+   > - Settings → Data Source → Dashboard URL (ngrok)
+   > - Paste the `https://abc123.ngrok-free.app` URL
+   > - Select your instrument from the dropdown
+   > - The overlay updates automatically every bar"
+
+3. **Tell them the local dashboard URL:**
+   > "Dashboard is live at: **http://192.168.101.245:5050**
+   > Open this on your phone — auto-refreshes every 60 seconds."
+
+4. **Wait for confirmation** that systems are running, then immediately generate and display the full H2 brief (follow the full brief procedure below).
+
+5. **End with your next action**, naming one specific instrument and timeframe to open right now.
+
+---
+
+### `H2 Stop`
+
+When the user types **H2 Stop**:
+
+> "Double-click **H2_STOP.bat** on your Desktop to cleanly shut down all H2 windows.
+>
+> This will close:
+> - H2 Monitor (stops the 5-min classification cycle)
+> - H2 Dashboard (port 5050 released)
+> - H2 Tunnel (ngrok connection closed)
+> - H2 TV Bridge (loop stopped)
+> - H2 Brief (generator window closed)
+>
+> Your data is preserved:
+> - `outputs/H2_live_state.json` — last known state retained
+> - `outputs/H2_signal_log.csv` — full history retained
+>
+> To restart: double-click **H2_GO.bat**."
+
+---
+
+## Standard Triggers
 
 User types: `H2 brief` OR `H2 session report`
 

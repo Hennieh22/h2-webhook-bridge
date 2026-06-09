@@ -1,272 +1,374 @@
 """
-H2 Quant v1 — TradingView Bridge (Phase 8)
-Reads H2_live_state.json every 5 minutes and:
-  1. Prints formatted Pine Script input values (paste into TV indicator settings)
-  2. Generates an updated .pine file with hardcoded current values
-  3. Optionally POSTs to a simple local web server that TradingView
-     can poll via request.security() (advanced — requires Pro subscription)
+H2 Quant v1 — TradingView Bridge  (pine/tv_bridge.py)
+======================================================
+Reads outputs/H2_live_state.json every 5 minutes.
+For each Tier 1 instrument, extracts all values needed
+by the Pine Script overlay inputs and prints a status line.
+
+Field mapping (H2_live_state.json  →  Pine Script input):
+  current_state                    → i_state
+  state_description                → i_description
+  session (top-level)              → i_session
+  generated_at_sast HH:MM          → i_sast_time
+  dwell_time_current_bars          → i_dwell_bars
+  dwell_time_avg_bars              → i_dwell_avg
+  next_states[0].state             → i_next1
+  next_states[0].probability       → i_prob1
+  next_states[0].ev                → i_ev1
+  next_states[1].state             → i_next2
+  next_states[1].probability       → i_prob2
+  next_states[1].ev                → i_ev2
+  next_states[2].state             → i_next3
+  next_states[2].probability       → i_prob3
+  next_states[2].ev                → i_ev3
+  gates.markov_gap.value           → i_g_markov_gap
+  gates.markov_persistence.value   → i_g_persistence
+  gates.volatility_cap.value       → i_g_vol_cap
+  gates.hurst.value                → i_g_hurst
+  gates.session.pass               → i_g_session_ok
+  conviction                       → i_conviction
+  pillars_confirmed                → i_pillars
+  historical_wr                    → i_hist_wr
+  historical_ev                    → i_hist_ev
+  sample_count                     → i_samples
 
 Usage:
-  python pine/tv_bridge.py --instrument JP225
-  python pine/tv_bridge.py --instrument JP225 --loop
-  python pine/tv_bridge.py --instrument JP225 --generate-pine
+  py -3 pine/tv_bridge.py                    # run once, all tier1
+  py -3 pine/tv_bridge.py --loop             # 5-minute continuous loop
+  py -3 pine/tv_bridge.py --verbose          # include full paste-values block
+  py -3 pine/tv_bridge.py --instrument US30  # single instrument
 """
 
 import io
 import json
 import sys
 import time
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 import argparse
-from datetime import datetime, timezone, timedelta
+import logging
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import yaml
 
-OUTPUTS_DIR = ROOT / "outputs"
-PINE_DIR    = ROOT / "pine"
-LIVE_STATE  = OUTPUTS_DIR / "H2_live_state.json"
-SAST_OFFSET = timedelta(hours=2)
+# ── Force UTF-8 stdout on Windows (avoids cp1252 encode errors) ────────────
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+# ── Paths ───────────────────────────────────────────────────────────────────
+ROOT        = Path(__file__).resolve().parent.parent
+LIVE_STATE  = ROOT / "outputs" / "H2_live_state.json"
+CONFIG_PATH = ROOT / "config.yaml"
+
+# ── Config ──────────────────────────────────────────────────────────────────
+with open(CONFIG_PATH, encoding="utf-8") as _f:
+    CFG = yaml.safe_load(_f)
+
+TIER1_INSTRUMENTS = CFG["instruments"]["tier1"]           # from config — never hardcoded
+WEBHOOK_URL       = CFG.get("webhook", {}).get("railway_url",    "")
+WEBHOOK_SECRET    = CFG.get("webhook", {}).get("webhook_secret", "")
+LOOP_INTERVAL     = int(CFG.get("monitor", {}).get("interval_seconds", 300))
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("tv_bridge")
 
 
-# ---------------------------------------------------------------------------
-# Data loader
-# ---------------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────────────────
+# 1.  Load live state JSON
+# ───────────────────────────────────────────────────────────────────────────
 
-def load_live_state() -> dict:
+def load_live_state() -> dict | None:
+    """
+    Load H2_live_state.json.
+    Returns None (and logs) if the file is missing or malformed.
+    """
     if not LIVE_STATE.exists():
-        print(f"ERROR: {LIVE_STATE} not found. Run the monitor first.")
-        sys.exit(1)
-    with open(LIVE_STATE, encoding="utf-8") as f:
-        return json.load(f)
+        log.warning(
+            "H2_live_state.json not found at %s -- waiting for monitor to run",
+            LIVE_STATE,
+        )
+        return None
+    try:
+        with open(LIVE_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        log.error("H2_live_state.json is malformed: %s", e)
+        return None
 
 
-def get_instrument_data(live_state: dict, instrument: str) -> dict:
-    instr = live_state.get("instruments", {}).get(instrument)
-    if not instr:
-        available = list(live_state.get("instruments", {}).keys())
-        print(f"ERROR: {instrument} not in live state. Available: {available}")
-        sys.exit(1)
-    return instr
+# ───────────────────────────────────────────────────────────────────────────
+# 2.  Extract Pine values for one instrument
+# ───────────────────────────────────────────────────────────────────────────
 
+def extract_pine_values(inst_data: dict, sast_timestamp: str) -> dict:
+    """
+    Map every field from one instrument's live-state dict to its
+    Pine Script input variable name.
 
-# ---------------------------------------------------------------------------
-# Value extractor — pulls all Pine input values from one instrument's data
-# ---------------------------------------------------------------------------
+    sast_timestamp: top-level generated_at_sast string from the JSON,
+                    e.g. "2026-06-09T10:32:55+02:00"  ->  i_sast_time = "10:32"
+    """
+    # i_sast_time: parsed from JSON timestamp — NOT datetime.now()
+    try:
+        sast_time = sast_timestamp[11:16]   # "2026-06-09T10:32:55+02:00" -> "10:32"
+    except (TypeError, IndexError):
+        sast_time = "--:--"
 
-def extract_pine_values(data: dict, instrument: str) -> dict:
-    now_utc  = datetime.now(timezone.utc)
-    now_sast = now_utc + SAST_OFFSET
+    # Next states (up to 3)
+    next_states = inst_data.get("next_states", [])
+    ns = [next_states[i] if i < len(next_states) else {} for i in range(3)]
 
-    state_id    = data.get("current_state", "UNKNOWN")
-    description = data.get("state_description", "No data")[:120]  # TV input length limit
-    session     = data.get("session", "OFFHOURS")
-    sast_time   = now_sast.strftime("%H:%M")
-
-    next_states  = data.get("next_states", [])
-    ns1 = next_states[0] if len(next_states) > 0 else {}
-    ns2 = next_states[1] if len(next_states) > 1 else {}
-    ns3 = next_states[2] if len(next_states) > 2 else {}
-
-    gates = data.get("gates", {})
-    g_gap  = gates.get("markov_gap",         {}).get("value", 0.0)
-    g_pers = gates.get("markov_persistence",  {}).get("value", 0.0)
-    g_vol  = gates.get("volatility_cap",      {}).get("value", 1.0)
-    g_hurst= gates.get("hurst",               {}).get("value", 0.5)
-    g_sess = gates.get("session",             {}).get("pass",  False)
-
-    conv    = data.get("conviction",         "SKIP")
-    pillars = data.get("pillars_confirmed",  0)
-    wr      = data.get("historical_wr",      0.0)
-    ev      = data.get("historical_ev",      0.0)
-    samples = data.get("sample_count",       0)
-    dwell_b = data.get("dwell_time_avg_bars", 0.0) or 0.0
-
-    # Estimate bars in current state from dwell time (Phase 7 doesn't track this yet)
-    dwell_in  = 1   # placeholder — Phase 7 monitor will track this
+    # Gates
+    gates  = inst_data.get("gates", {})
+    g_gap  = float(gates.get("markov_gap",         {}).get("value", 0.0))
+    g_pers = float(gates.get("markov_persistence",  {}).get("value", 0.0))
+    g_vol  = float(gates.get("volatility_cap",      {}).get("value", 1.0))
+    g_hrst = float(gates.get("hurst",               {}).get("value", 0.5))
+    g_sess = bool( gates.get("session",             {}).get("pass",  False))
 
     return {
-        "state":         state_id,
-        "description":   description,
-        "session":       session,
-        "sast_time":     sast_time,
-        "dwell_bars":    dwell_in,
-        "dwell_avg":     round(float(dwell_b), 1),
-        "next1":         ns1.get("state",       ""),
-        "prob1":         round(float(ns1.get("probability", 0.0)), 4),
-        "ev1":           round(float(ns1.get("ev",          0.0)), 3),
-        "next2":         ns2.get("state",       ""),
-        "prob2":         round(float(ns2.get("probability", 0.0)), 4),
-        "ev2":           round(float(ns2.get("ev",          0.0)), 3),
-        "next3":         ns3.get("state",       ""),
-        "prob3":         round(float(ns3.get("probability", 0.0)), 4),
-        "ev3":           round(float(ns3.get("ev",          0.0)), 3),
-        "g_markov_gap":  round(float(g_gap),  4),
-        "g_persistence": round(float(g_pers), 4),
-        "g_vol_cap":     round(float(g_vol),  4),
-        "g_hurst":       round(float(g_hurst),4),
-        "g_session_ok":  bool(g_sess),
-        "conviction":    conv,
-        "pillars":       pillars,
-        "hist_wr":       round(float(wr),      4),
-        "hist_ev":       round(float(ev),      4),
-        "samples":       samples,
+        # Current state
+        "i_state":       inst_data.get("current_state",    "UNKNOWN"),
+        "i_description": (inst_data.get("state_description") or "")[:120],
+        "i_session":     inst_data.get("session",          "OFFHOURS"),
+        "i_sast_time":   sast_time,
+        "i_dwell_bars":  int(  inst_data.get("dwell_time_current_bars") or 1),
+        "i_dwell_avg":   round(float(inst_data.get("dwell_time_avg_bars")  or 0.0), 1),
+
+        # Next-state transitions
+        "i_next1": ns[0].get("state",       ""),
+        "i_prob1": round(float(ns[0].get("probability", 0.0)), 4),
+        "i_ev1":   round(float(ns[0].get("ev",          0.0)), 3),
+
+        "i_next2": ns[1].get("state",       ""),
+        "i_prob2": round(float(ns[1].get("probability", 0.0)), 4),
+        "i_ev2":   round(float(ns[1].get("ev",          0.0)), 3),
+
+        "i_next3": ns[2].get("state",       ""),
+        "i_prob3": round(float(ns[2].get("probability", 0.0)), 4),
+        "i_ev3":   round(float(ns[2].get("ev",          0.0)), 3),
+
+        # Gate values
+        "i_g_markov_gap":  round(g_gap,  4),
+        "i_g_persistence": round(g_pers, 4),
+        "i_g_vol_cap":     round(g_vol,  4),
+        "i_g_hurst":       round(g_hrst, 4),
+        "i_g_session_ok":  g_sess,
+
+        # Conviction & stats
+        "i_conviction": inst_data.get("conviction",      "SKIP"),
+        "i_pillars":    int(  inst_data.get("pillars_confirmed", 0)),
+        "i_hist_wr":    round(float(inst_data.get("historical_wr", 0.0)), 4),
+        "i_hist_ev":    round(float(inst_data.get("historical_ev", 0.0)), 4),
+        "i_samples":    int(  inst_data.get("sample_count",      0)),
     }
 
 
-# ---------------------------------------------------------------------------
-# Formatters
-# ---------------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────────────────
+# 3.  Status line printer
+# ───────────────────────────────────────────────────────────────────────────
 
-def print_paste_values(v: dict, instrument: str):
-    """Print values to paste into TradingView indicator settings."""
-    sep = "=" * 72
+def print_status(instrument: str, v: dict):
+    """
+    Print the compact one-liner per spec:
+      TV bridge -- US30     updated 10:32 SAST | state | conv=A+ pillars=4/4 GATES OK | next=68% +1.80R
+    """
+    all_gates = (
+        v["i_g_markov_gap"]  >= 0.61 and
+        v["i_g_persistence"] >= 0.82 and
+        v["i_g_vol_cap"]     <= 1.25 and
+        v["i_g_hurst"]       >= 0.50 and
+        v["i_g_session_ok"]
+    )
+    gates_str = "GATES OK" if all_gates else "gates FAIL"
+    prob1_pct = int(round(v["i_prob1"] * 100))
+    ev1_str   = f"{v['i_ev1']:+.2f}R"
+    state_str = v["i_state"][:48]
+
+    print(
+        f"TV bridge -- {instrument:<8} updated {v['i_sast_time']} SAST  |  "
+        f"{state_str:<48}  |  "
+        f"conv={v['i_conviction']}  pillars={v['i_pillars']}/4  {gates_str}  |  "
+        f"next={prob1_pct}% {ev1_str}"
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 4.  Verbose paste-values block
+# ───────────────────────────────────────────────────────────────────────────
+
+def print_paste_values(instrument: str, v: dict):
+    """Print every Pine input value formatted for manual entry in TV settings."""
+    sep = "-" * 72
     print(f"\n{sep}")
-    print(f"  H2 STATE OVERLAY — INPUT VALUES FOR: {instrument}")
-    print(f"  Copy-paste each value into the corresponding Pine input field")
-    print(f"{sep}")
-    print(f"\n  ── Current State ─────────────────────────────────────────")
-    print(f"  Current State ID          : {v['state']}")
-    print(f"  Plain English Description : {v['description']}")
-    print(f"  Session                   : {v['session']}")
-    print(f"  SAST Time                 : {v['sast_time']}")
-    print(f"  Bars in State             : {v['dwell_bars']}")
-    print(f"  Avg Dwell Time            : {v['dwell_avg']}")
-    print(f"\n  ── Next States ───────────────────────────────────────────")
-    print(f"  Next State 1  : {v['next1']}")
-    print(f"  Probability 1 : {v['prob1']}   ({v['prob1']*100:.1f}%)")
-    print(f"  EV 1          : {v['ev1']}")
-    print(f"  Next State 2  : {v['next2']}")
-    print(f"  Probability 2 : {v['prob2']}   ({v['prob2']*100:.1f}%)")
-    print(f"  EV 2          : {v['ev2']}")
-    print(f"  Next State 3  : {v['next3']}")
-    print(f"  Probability 3 : {v['prob3']}   ({v['prob3']*100:.1f}%)")
-    print(f"  EV 3          : {v['ev3']}")
-    print(f"\n  ── Gate Values ───────────────────────────────────────────")
-    print(f"  Gate 1 Markov Gap     : {v['g_markov_gap']}  {'PASS' if v['g_markov_gap'] >= 0.61 else 'FAIL'}")
-    print(f"  Gate 2 Persistence    : {v['g_persistence']}  {'PASS' if v['g_persistence'] >= 0.82 else 'FAIL'}")
-    print(f"  Gate 3 Vol Cap        : {v['g_vol_cap']}  {'PASS' if v['g_vol_cap'] <= 1.25 else 'FAIL'}")
-    print(f"  Gate 4 Hurst          : {v['g_hurst']}  {'PASS' if v['g_hurst'] >= 0.50 else 'FAIL'}")
-    print(f"  Gate 5 Session Pass   : {v['g_session_ok']}")
-    print(f"\n  ── Conviction ────────────────────────────────────────────")
-    print(f"  Conviction        : {v['conviction']}")
-    print(f"  Pillars           : {v['pillars']}")
-    print(f"  Historical WR     : {v['hist_wr']}   ({v['hist_wr']*100:.1f}%)")
-    print(f"  Historical EV     : {v['hist_ev']}")
-    print(f"  Sample Count      : {v['samples']}")
+    print(f"  PASTE VALUES FOR: {instrument}")
+    print(sep)
+
+    print(f"\n  -- Current State --")
+    print(f"  i_state        : {v['i_state']}")
+    print(f"  i_description  : {v['i_description']}")
+    print(f"  i_session      : {v['i_session']}")
+    print(f"  i_sast_time    : {v['i_sast_time']}")
+    print(f"  i_dwell_bars   : {v['i_dwell_bars']}")
+    print(f"  i_dwell_avg    : {v['i_dwell_avg']}")
+
+    print(f"\n  -- Next States --")
+    for n in (1, 2, 3):
+        st  = v[f"i_next{n}"] or "(none)"
+        pct = int(round(v[f"i_prob{n}"] * 100))
+        ev  = v[f"i_ev{n}"]
+        print(f"  [{n}] {pct:3d}%  {ev:+.3f}R  {st}")
+
+    print(f"\n  -- Gates --")
+    gate_rows = [
+        ("i_g_markov_gap",  v["i_g_markov_gap"],  ">=", 0.61),
+        ("i_g_persistence", v["i_g_persistence"],  ">=", 0.82),
+        ("i_g_vol_cap",     v["i_g_vol_cap"],      "<=", 1.25),
+        ("i_g_hurst",       v["i_g_hurst"],        ">=", 0.50),
+    ]
+    for name, val, op, thr in gate_rows:
+        ok     = (val >= thr) if op == ">=" else (val <= thr)
+        status = "PASS" if ok else "FAIL"
+        print(f"  {name:<22} : {val}   {status}  (thr {op} {thr})")
+    sess_ok = "PASS" if v["i_g_session_ok"] else "FAIL"
+    print(f"  {'i_g_session_ok':<22} : {v['i_g_session_ok']}   {sess_ok}")
+
+    print(f"\n  -- Conviction & Stats --")
+    print(f"  i_conviction   : {v['i_conviction']}")
+    print(f"  i_pillars      : {v['i_pillars']}/4")
+    print(f"  i_hist_wr      : {v['i_hist_wr']}  ({v['i_hist_wr']*100:.1f}%)")
+    print(f"  i_hist_ev      : {v['i_hist_ev']:+.4f}R")
+    print(f"  i_samples      : {v['i_samples']}")
     print(f"{sep}\n")
 
 
-def generate_pine_file(v: dict, instrument: str) -> Path:
+# ───────────────────────────────────────────────────────────────────────────
+# 5.  Update one instrument
+# ───────────────────────────────────────────────────────────────────────────
+
+def update_instrument(
+    instrument: str,
+    live_state: dict,
+    verbose: bool = False,
+) -> bool:
     """
-    Generate a ready-to-paste Pine Script file with hardcoded current values.
-    Write to pine/H2_state_overlay_{instrument}_LIVE.pine
+    Extract and display Pine values for one instrument.
+    Returns True on success, False if instrument absent from JSON.
     """
-    template_path = PINE_DIR / "H2_state_overlay_TEST.pine"
-    if not template_path.exists():
-        print("ERROR: Template file not found.")
-        return None
+    inst_data = live_state.get("instruments", {}).get(instrument)
+    if inst_data is None:
+        log.warning("%s: not in H2_live_state.json -- skipping", instrument)
+        return False
 
-    with open(template_path, encoding="utf-8") as f:
-        content = f.read()
+    sast_ts = live_state.get("generated_at_sast", "")
+    v = extract_pine_values(inst_data, sast_ts)
 
-    # Replace the test indicator name
-    content = content.replace(
-        'indicator("H2 State Overlay [TEST]"',
-        f'indicator("H2 State Overlay [{instrument}]"'
+    print_status(instrument, v)
+
+    if verbose:
+        print_paste_values(instrument, v)
+
+    return True
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 6.  Main loop — all tier1 instruments
+# ───────────────────────────────────────────────────────────────────────────
+
+def run_once(
+    instruments: list,
+    verbose: bool = False,
+) -> int:
+    """
+    One pass across all instruments.
+    Returns count of successfully updated instruments.
+    """
+    live_state = load_live_state()
+    if live_state is None:
+        return 0
+
+    gen_at = live_state.get("generated_at_sast", "?")[:19]
+    print(f"\nTV bridge -- {len(instruments)} instrument(s) -- data as of {gen_at} SAST")
+    print(
+        f"Webhook    : "
+        f"{'configured  ' + WEBHOOK_URL[:55] if WEBHOOK_URL else 'NOT SET in config'}"
     )
-    content = content.replace(
-        'shorttitle="H2-TEST"',
-        f'shorttitle="H2-{instrument}"'
-    )
+    print("-" * 80)
 
-    # Replace hardcoded test data block
-    replacements = {
-        '"BULL_STRONG_HIGH_ABOVE_NY_BOS_OB"': f'"{v["state"]}"',
-        '"JP225: bullish with strong momentum (high vol, BOS printed, RSI overbought, NY). Top transition (68%): pullback then continuation. Wait for fractal HL on retrace with RVOL declining."':
-            f'"{v["description"]}"',
-        '"NY"':    f'"{v["session"]}"',
-        '"17:45"': f'"{v["sast_time"]}"',
-        'i_dwell_bars  = 4':     f'i_dwell_bars  = {v["dwell_bars"]}',
-        'i_dwell_avg   = 6.2':   f'i_dwell_avg   = {v["dwell_avg"]}',
-        '"BULL_WEAK_NORMAL_ABOVE_NY_PULLBACK_NEUTRAL"': f'"{v["next1"]}"',
-        'i_prob1       = 0.68': f'i_prob1       = {v["prob1"]}',
-        'i_ev1         = 1.80': f'i_ev1         = {v["ev1"]}',
-        '"BULL_STRONG_HIGH_ABOVE_NY_BOS_OB"': f'"{v["next2"]}"',  # next2 reuses same pattern
-        'i_prob2       = 0.21': f'i_prob2       = {v["prob2"]}',
-        'i_ev2         = 2.10': f'i_ev2         = {v["ev2"]}',
-        '"BEAR_WEAK_HIGH_ABOVE_NY_CHOCH_OS"': f'"{v["next3"]}"',
-        'i_prob3       = 0.11': f'i_prob3       = {v["prob3"]}',
-        'i_ev3         = -0.40': f'i_ev3         = {v["ev3"]}',
-        'i_g_markov_gap  = 0.68': f'i_g_markov_gap  = {v["g_markov_gap"]}',
-        'i_g_persistence = 0.87': f'i_g_persistence = {v["g_persistence"]}',
-        'i_g_vol_cap     = 1.05': f'i_g_vol_cap     = {v["g_vol_cap"]}',
-        'i_g_hurst       = 0.61': f'i_g_hurst       = {v["g_hurst"]}',
-        'i_g_session_ok  = true': f'i_g_session_ok  = {"true" if v["g_session_ok"] else "false"}',
-        '"A+"':                f'"{v["conviction"]}"',
-        'i_pillars     = 4':   f'i_pillars     = {v["pillars"]}',
-        'i_hist_wr     = 0.71': f'i_hist_wr     = {v["hist_wr"]}',
-        'i_hist_ev     = 1.80': f'i_hist_ev     = {v["hist_ev"]}',
-        'i_samples     = 847': f'i_samples     = {v["samples"]}',
-    }
-
-    for old, new in replacements.items():
-        content = content.replace(old, new, 1)  # replace first occurrence only
-
-    out_path = PINE_DIR / f"H2_state_overlay_{instrument}_LIVE.pine"
-    out_path.write_text(content, encoding="utf-8")
-    print(f"Generated: {out_path}")
-    return out_path
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def run_once(instrument: str, gen_pine: bool = False):
-    live  = load_live_state()
-    data  = get_instrument_data(live, instrument)
-    v     = extract_pine_values(data, instrument)
-
-    print(f"\nLast update: {live.get('generated_at_sast','?')[:19]} SAST")
-    print(f"Instrument : {instrument}")
-    print(f"State      : {v['state']}")
-    print(f"Session    : {v['session']}")
-    print(f"Conviction : {v['conviction']}  |  Pillars: {v['pillars']}/4")
-
-    print_paste_values(v, instrument)
-
-    if gen_pine:
-        out = generate_pine_file(v, instrument)
-        if out:
-            print(f"Paste the contents of {out.name} into TradingView Pine Editor.")
-
-    return v
-
-
-def run_loop(instrument: str, interval: int = 300):
-    print(f"TV Bridge running — refreshing every {interval}s. Press Ctrl+C to stop.")
-    while True:
+    ok = 0
+    for inst in instruments:
         try:
-            run_once(instrument, gen_pine=True)
+            if update_instrument(inst, live_state, verbose=verbose):
+                ok += 1
         except Exception as e:
-            print(f"Error: {e}")
-        print(f"Next refresh in {interval}s...")
+            log.error("%s: unexpected error -- %s -- continuing to next instrument", inst, e)
+
+    print("-" * 80)
+    print(f"TV bridge -- pass complete  ({ok}/{len(instruments)} updated)\n")
+    return ok
+
+
+def run_loop(
+    instruments: list,
+    verbose: bool = False,
+    interval: int = LOOP_INTERVAL,
+):
+    """
+    Continuous 5-minute loop per spec:
+      while True:
+          for instrument in tier1_instruments:
+              update_instrument(instrument)
+          sleep(300)
+    """
+    log.info(
+        "TV bridge loop started -- %d instruments -- interval %ds -- Ctrl+C to stop",
+        len(instruments),
+        interval,
+    )
+    while True:
+        run_once(instruments, verbose=verbose)
+        log.info("TV bridge -- sleeping %ds ...", interval)
         time.sleep(interval)
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# 7.  CLI
+# ───────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="H2 TradingView Bridge")
-    parser.add_argument("--instrument", "-i", default="JP225",
-                        help="Instrument to display (default: JP225)")
-    parser.add_argument("--loop",         action="store_true",
-                        help="Run continuously every 5 minutes")
-    parser.add_argument("--generate-pine", action="store_true",
-                        help="Generate a ready-to-paste .pine file")
+    parser = argparse.ArgumentParser(
+        description="H2 TradingView Bridge -- maps H2_live_state.json to Pine inputs"
+    )
+    parser.add_argument(
+        "--instrument", "-i",
+        default=None,
+        help=(
+            f"Single instrument to process (default: all tier1 from config = "
+            f"{TIER1_INSTRUMENTS})"
+        ),
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help=f"Run continuously every {LOOP_INTERVAL}s",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Print full copy-paste value block per instrument",
+    )
     args = parser.parse_args()
 
-    if args.loop:
-        run_loop(args.instrument)
+    # Instrument list — always from config, never hardcoded
+    if args.instrument:
+        instruments = [args.instrument.upper()]
     else:
-        run_once(args.instrument, gen_pine=args.generate_pine)
+        instruments = TIER1_INSTRUMENTS   # list from config.yaml instruments.tier1
+
+    if args.loop:
+        run_loop(instruments, verbose=args.verbose)
+    else:
+        run_once(instruments, verbose=args.verbose)

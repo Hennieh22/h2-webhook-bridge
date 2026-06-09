@@ -1,15 +1,18 @@
-// H2 State Overlay v1.3
+// H2 State Overlay v2.0
 // H2 Systematic Trading
 // © 2026 H2 Quant Systems
 // Invite-only — do not redistribute
 //
-// Display-only overlay for H2 Quant live state.
-// No signals. No alerts. Data via input fields (auto-populated by tv_bridge.py).
-// All panels independently moveable and resizable via Settings → Inputs.
-// v1.3 — all function calls on single lines (Pine Script v5 compatibility)
+// Live data overlay for H2 Quant state engine.
+// Data pulled automatically via request.json() from Railway endpoint.
+// Select instrument in Settings → Data Source → Instrument.
+// No manual input needed. Updates every bar from live JSON.
+//
+// v2.0 — switched from manual inputs to request.json() live data feed
+//         endpoint: /api/live-state/{instrument}
 
 //@version=5
-indicator("H2 State Overlay v1.3", overlay=true, max_boxes_count=10, max_lines_count=50, max_labels_count=500, shorttitle="H2")
+indicator("H2 State Overlay v2.0", overlay=true, max_boxes_count=10, max_lines_count=50, max_labels_count=500, shorttitle="H2")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GROUP 1 — LAYOUT & APPEARANCE
@@ -30,57 +33,113 @@ i_show_dwell   = input.bool(true, "Show Dwell Label",      group=G_LAYOUT)
 i_show_bg_tint = input.bool(true, "Show Background Tint",  group=G_LAYOUT)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GROUP 2 — CURRENT STATE
+// GROUP 2 — DATA SOURCE
 // ═══════════════════════════════════════════════════════════════════════════
+// Paste your ngrok URL here. Data is fetched automatically every bar refresh.
+// How to get the URL:
+//   1. Run start_h2.bat on your Windows machine
+//   2. Copy the ngrok URL printed in the monitor startup banner
+//   3. Paste it in the field below (no trailing slash)
+// Example: https://abc123.ngrok-free.app
+//
+// If the URL is empty or ngrok is not running, all fields show "LOADING..."
+// No other manual input needed — all data comes from the live JSON endpoint.
 
-var G_STATE = "Current State"
+var G_SOURCE = "Data Source"
 
-i_state       = input.string("UNKNOWN",                  "Current State ID",          group=G_STATE)
-i_description = input.string("No data - run tv_bridge.py", "Plain English Description", group=G_STATE)
-i_session     = input.string("OFFHOURS",                 "Session",                   group=G_STATE)
-i_sast_time   = input.string("--:--",                    "SAST Time HH MM",           group=G_STATE)
-i_dwell_bars  = input.int(0,   "Bars in Current State",  minval=0,   group=G_STATE)
-i_dwell_avg   = input.float(0.0, "Avg Dwell Time bars",  minval=0.0, group=G_STATE)
+i_instrument = input.string("US30", "Instrument",
+     options=["US30","GBPUSD","DE40","XAUUSD","GBPJPY","EURJPY"],
+     tooltip="Select the H2 Quant instrument to display. Changing this re-fetches live data automatically.",
+     group=G_SOURCE)
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GROUP 3 — NEXT STATES
-// ═══════════════════════════════════════════════════════════════════════════
-
-var G_NEXT = "Next States"
-
-i_next1 = input.string("", "Next State 1", group=G_NEXT)
-i_prob1 = input.float(0.0, "Probability 1", minval=0.0, maxval=1.0, group=G_NEXT)
-i_ev1   = input.float(0.0, "EV 1 R", group=G_NEXT)
-i_next2 = input.string("", "Next State 2", group=G_NEXT)
-i_prob2 = input.float(0.0, "Probability 2", minval=0.0, maxval=1.0, group=G_NEXT)
-i_ev2   = input.float(0.0, "EV 2 R", group=G_NEXT)
-i_next3 = input.string("", "Next State 3", group=G_NEXT)
-i_prob3 = input.float(0.0, "Probability 3", minval=0.0, maxval=1.0, group=G_NEXT)
-i_ev3   = input.float(0.0, "EV 3 R", group=G_NEXT)
+i_ngrok_url = input.string(
+     "",
+     "Dashboard URL (ngrok)",
+     tooltip="Paste your ngrok public URL here. Example: https://abc123.ngrok-free.app  |  Get it from the monitor startup banner or run: ngrok http 5050",
+     group=G_SOURCE)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GROUP 4 — GATE VALUES
+// LIVE DATA — request.json()
 // ═══════════════════════════════════════════════════════════════════════════
+// All fields fetched from /api/live-state/{instrument} using JSON Pointers.
+// Multiple calls with the same URL share a single HTTP request (Pine caches).
+// 26 request.json() calls — within the 40-call limit.
+//
+// If i_ngrok_url is empty we point at a harmless placeholder so request.json()
+// returns na for every field — the na() fallbacks show "LOADING..." cleanly.
+// No error is thrown because ignore_invalid_symbols=true.
 
-var G_GATES = "Gate Values"
+_url_base = str.length(i_ngrok_url) > 8 ? i_ngrok_url : "https://example.com/h2/na"
+url = _url_base + "/api/live-state/" + i_instrument
 
-i_g_markov_gap  = input.float(0.0,  "Gate 1 Markov Gap",     group=G_GATES)
-i_g_persistence = input.float(0.0,  "Gate 2 Persistence",    group=G_GATES)
-i_g_vol_cap     = input.float(1.0,  "Gate 3 Vol Cap Ratio",  group=G_GATES)
-i_g_hurst       = input.float(0.5,  "Gate 4 Hurst",          group=G_GATES)
-i_g_session_ok  = input.bool(false, "Gate 5 Session Pass",   group=G_GATES)
+// ── Current state ────────────────────────────────────────────────────────
+_r_state  = request.json(url, "/current_state",    ignore_invalid_symbols=true)
+_r_desc   = request.json(url, "/state_description", ignore_invalid_symbols=true)
+_r_sess   = request.json(url, "/session",           ignore_invalid_symbols=true)
+_r_sast   = request.json(url, "/generated_at_sast", ignore_invalid_symbols=true)
+_r_dwell_c = request.json(url, "/dwell_time_current_bars", ignore_invalid_symbols=true)
+_r_dwell_a = request.json(url, "/dwell_time_avg_bars",     ignore_invalid_symbols=true)
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GROUP 5 — CONVICTION
-// ═══════════════════════════════════════════════════════════════════════════
+i_state       = na(_r_state)   ? "LOADING..."          : str.tostring(_r_state)
+i_description = na(_r_desc)    ? "Waiting for data..."  : str.tostring(_r_desc)
+i_session     = na(_r_sess)    ? "OFFHOURS"             : str.tostring(_r_sess)
+i_dwell_bars  = na(_r_dwell_c) ? 0 : math.round(float(_r_dwell_c))
+i_dwell_avg   = na(_r_dwell_a) ? 0.0 : float(_r_dwell_a)
 
-var G_CONV = "Conviction"
+// Extract HH:MM from "2026-06-09T10:32:55+02:00"
+_sast_str   = na(_r_sast) ? "--:--" : str.tostring(_r_sast)
+i_sast_time = str.length(_sast_str) >= 16 ? str.substring(_sast_str, 11, 16) : _sast_str
 
-i_conviction = input.string("SKIP", "Conviction A+ A B SKIP", group=G_CONV)
-i_pillars    = input.int(0,   "Pillars Confirmed 0-4", minval=0, maxval=4, group=G_CONV)
-i_hist_wr    = input.float(0.0, "Historical Win Rate", group=G_CONV)
-i_hist_ev    = input.float(0.0, "Historical EV R",     group=G_CONV)
-i_samples    = input.int(0,   "Sample Count",          group=G_CONV)
+// ── Next states ──────────────────────────────────────────────────────────
+_r_next1  = request.json(url, "/next_states/0/state",       ignore_invalid_symbols=true)
+_r_prob1  = request.json(url, "/next_states/0/probability", ignore_invalid_symbols=true)
+_r_ev1    = request.json(url, "/next_states/0/ev",          ignore_invalid_symbols=true)
+
+_r_next2  = request.json(url, "/next_states/1/state",       ignore_invalid_symbols=true)
+_r_prob2  = request.json(url, "/next_states/1/probability", ignore_invalid_symbols=true)
+_r_ev2    = request.json(url, "/next_states/1/ev",          ignore_invalid_symbols=true)
+
+_r_next3  = request.json(url, "/next_states/2/state",       ignore_invalid_symbols=true)
+_r_prob3  = request.json(url, "/next_states/2/probability", ignore_invalid_symbols=true)
+_r_ev3    = request.json(url, "/next_states/2/ev",          ignore_invalid_symbols=true)
+
+i_next1 = na(_r_next1) ? "—" : str.tostring(_r_next1)
+i_prob1 = na(_r_prob1) ? 0.0 : float(_r_prob1)
+i_ev1   = na(_r_ev1)   ? 0.0 : float(_r_ev1)
+
+i_next2 = na(_r_next2) ? "—" : str.tostring(_r_next2)
+i_prob2 = na(_r_prob2) ? 0.0 : float(_r_prob2)
+i_ev2   = na(_r_ev2)   ? 0.0 : float(_r_ev2)
+
+i_next3 = na(_r_next3) ? "—" : str.tostring(_r_next3)
+i_prob3 = na(_r_prob3) ? 0.0 : float(_r_prob3)
+i_ev3   = na(_r_ev3)   ? 0.0 : float(_r_ev3)
+
+// ── Gate values ──────────────────────────────────────────────────────────
+_r_gap  = request.json(url, "/gates/markov_gap/value",         ignore_invalid_symbols=true)
+_r_pers = request.json(url, "/gates/markov_persistence/value", ignore_invalid_symbols=true)
+_r_vol  = request.json(url, "/gates/volatility_cap/value",     ignore_invalid_symbols=true)
+_r_hrst = request.json(url, "/gates/hurst/value",              ignore_invalid_symbols=true)
+_r_sess_gate = request.json(url, "/gates/session/pass",        ignore_invalid_symbols=true)
+
+i_g_markov_gap  = na(_r_gap)       ? 0.0   : float(_r_gap)
+i_g_persistence = na(_r_pers)      ? 0.0   : float(_r_pers)
+i_g_vol_cap     = na(_r_vol)       ? 1.0   : float(_r_vol)
+i_g_hurst       = na(_r_hrst)      ? 0.5   : float(_r_hrst)
+i_g_session_ok  = na(_r_sess_gate) ? false : bool(_r_sess_gate)
+
+// ── Conviction & stats ───────────────────────────────────────────────────
+_r_conv    = request.json(url, "/conviction",        ignore_invalid_symbols=true)
+_r_pillars = request.json(url, "/pillars_confirmed", ignore_invalid_symbols=true)
+_r_wr      = request.json(url, "/historical_wr",     ignore_invalid_symbols=true)
+_r_ev_hist = request.json(url, "/historical_ev",     ignore_invalid_symbols=true)
+_r_samp    = request.json(url, "/sample_count",      ignore_invalid_symbols=true)
+
+i_conviction = na(_r_conv)    ? "SKIP" : str.tostring(_r_conv)
+i_pillars    = na(_r_pillars) ? 0      : math.round(float(_r_pillars))
+i_hist_wr    = na(_r_wr)      ? 0.0    : float(_r_wr)
+i_hist_ev    = na(_r_ev_hist) ? 0.0    : float(_r_ev_hist)
+i_samples    = na(_r_samp)    ? 0      : math.round(float(_r_samp))
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MAPPERS
@@ -183,12 +242,15 @@ if barstate.islast
             tbl_left      := table.new(pos_from_string(i_left_pos), 3, 9, bgcolor=C_BG, border_color=C_BORDER, border_width=1, frame_color=C_FRAME, frame_width=2)
             prev_left_pos := i_left_pos
 
-        // Row 0: Header
-        sess_str = i_session + "  " + i_sast_time + " SAST"
-        table.cell(tbl_left, 0, 0, "H2 QUANT",   text_color=C_GOLD,  text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_left)
-        table.cell(tbl_left, 1, 0, "LIVE STATE",  text_color=C_GOLD,  text_size=sz_h, bgcolor=C_HDR)
+        // Row 0: Header — shows instrument name + session + SAST time
+        //         Appends "(no URL)" warning if ngrok URL not set
+        _url_ok     = str.length(i_ngrok_url) > 8
+        _url_suffix = _url_ok ? (i_session + "  " + i_sast_time + " SAST") : "PASTE NGROK URL"
+        inst_header = i_instrument + "  |  " + _url_suffix
+        table.cell(tbl_left, 0, 0, "H2 QUANT",    text_color=C_GOLD,  text_size=sz_h, bgcolor=C_HDR, text_halign=text.align_left)
+        table.cell(tbl_left, 1, 0, "LIVE STATE",   text_color=C_GOLD,  text_size=sz_h, bgcolor=C_HDR)
         table.merge_cells(tbl_left, 0, 0, 1, 0)
-        table.cell(tbl_left, 2, 0, sess_str,       text_color=C_GRAY,  text_size=sz_s, bgcolor=C_HDR, text_halign=text.align_right)
+        table.cell(tbl_left, 2, 0, inst_header,    text_color=C_GRAY,  text_size=sz_s, bgcolor=C_HDR, text_halign=text.align_right)
 
         // Row 1: State ID
         table.cell(tbl_left, 0, 1, "STATE",   text_color=C_GRAY,       text_size=sz_s, bgcolor=C_CELL, text_halign=text.align_left)

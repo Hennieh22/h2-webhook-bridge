@@ -865,8 +865,8 @@ def validate(
     train_df, oos_df = wfv.split_data(df)
     train_period = wfv._date_range(train_df)
     oos_period   = wfv._date_range(oos_df)
-    log.info(f"Train: {train_period[0]}–{train_period[1]} ({len(train_df)} bars) | "
-             f"OOS: {oos_period[0]}–{oos_period[1]} ({len(oos_df)} bars)")
+    log.info(f"Train: {train_period[0]} to {train_period[1]} ({len(train_df)} bars) | "
+             f"OOS: {oos_period[0]} to {oos_period[1]} ({len(oos_df)} bars)")
 
     # ── In-sample stats ───────────────────────────────────────────────────
     log.info("Computing in-sample state stats...")
@@ -1061,18 +1061,492 @@ def validate_batch(
     return results
 
 
+# ── validate_all_walk_forward ─────────────────────────────────────────────────
+
+def validate_all_walk_forward(min_transitions: int = 200) -> None:
+    """
+    Walk-forward validation across all instrument/TF combinations.
+
+    - Filters by >= min_transitions in the transition matrix
+    - 5 expanding windows per spec:
+        W1: train 0–20%, test 20–40%
+        W2: train 0–40%, test 40–60%
+        W3: train 0–60%, test 60–80%
+        W4: train 0–80%, test 80–90%
+        W5: train 0–90%, test 90–100%
+    - Per-state stability: 1 - (degrade / is_wr), averaged across windows
+    - Flags: OVERFIT (degrade > 15pp), UNRELIABLE (stability < 0.4),
+             REMOVE (OOS WR < 50% on BULL state)
+    - Prints consolidated console table
+    - Saves outputs/H2_walkforward_report.md
+    - Updates outputs/H2_state_stats.json (consolidated)
+    """
+    WINDOW_SPLITS = [
+        (0.0, 0.20, 0.40),   # W1: train 0–20%, test 20–40%
+        (0.0, 0.40, 0.60),   # W2: train 0–40%, test 40–60%
+        (0.0, 0.60, 0.80),   # W3: train 0–60%, test 60–80%
+        (0.0, 0.80, 0.90),   # W4: train 0–80%, test 80–90%
+        (0.0, 0.90, 1.00),   # W5: train 0–90%, test 90–100%
+    ]
+
+    log.info("=" * 72)
+    log.info("WALK-FORWARD VALIDATION — ALL INSTRUMENTS")
+    log.info(f"Min transitions: {min_transitions} | Windows: {len(WINDOW_SPLITS)}")
+    log.info("=" * 72)
+
+    # Discover all available instrument/TF combos from parquet files
+    combos = []
+    for pq_path in sorted(STATES_DIR.glob("H2_states_*.parquet")):
+        stem_parts = pq_path.stem.replace("H2_states_", "").rsplit("_", 1)
+        if len(stem_parts) != 2:
+            continue
+        inst, tf = stem_parts
+        tm_path  = OUTPUTS_DIR / f"H2_transition_matrix_{inst}_{tf}.json"
+        if not tm_path.exists():
+            continue
+        combos.append((inst, tf, pq_path, tm_path))
+
+    log.info(f"Found {len(combos)} instrument/TF combinations to evaluate")
+
+    summary_rows = []
+    consolidated = {}
+    skipped      = []
+    tier2_min    = CFG.get("sharpe_minimums", {}).get("tier2_minimum", 3.0)
+
+    for inst, tf, pq_path, tm_path in combos:
+        key = f"{inst}_{tf}"
+
+        # Load transition matrix
+        with open(tm_path, encoding="utf-8") as f:
+            tm_data = json.load(f)
+        global_matrix     = tm_data.get("matrices", {}).get("global", {})
+        total_transitions = int(tm_data.get("total_transitions", 0))
+
+        if total_transitions < min_transitions:
+            log.info(f"SKIP {key} — {total_transitions} transitions (< {min_transitions})")
+            skipped.append(f"{key} ({total_transitions} transitions)")
+            continue
+
+        # Load states parquet
+        df = pd.read_parquet(pq_path)
+        if "datetime_utc" not in df.columns or df.empty:
+            log.warning(f"SKIP {key} — no datetime_utc column or empty")
+            skipped.append(f"{key} (no datetime)")
+            continue
+        df = df.sort_values("datetime_utc").reset_index(drop=True)
+        n  = len(df)
+        if n < MIN_SAMPLES * 4:
+            log.info(f"SKIP {key} — only {n} bars")
+            skipped.append(f"{key} ({n} bars)")
+            continue
+
+        log.info(f"Processing {key} — {n} bars, {total_transitions} transitions")
+
+        try:
+            # ── 5-window walk-forward ─────────────────────────────────────
+            window_state_data: dict[str, list] = {}
+
+            for w_idx, (train_start_pct, train_end_pct, test_end_pct) in enumerate(WINDOW_SPLITS, 1):
+                train_start = int(n * train_start_pct)
+                train_end   = int(n * train_end_pct)
+                test_end    = int(n * test_end_pct)
+
+                train_df = df.iloc[train_start:train_end].copy()
+                oos_df   = df.iloc[train_end:test_end].copy()
+
+                if len(train_df) < MIN_SAMPLES * 2 or len(oos_df) < MIN_SAMPLES:
+                    log.debug(f"  W{w_idx} {key}: too few bars, skipping")
+                    continue
+
+                is_stats_w, _  = StatePerformanceCalculator().compute(train_df)
+                oos_stats_w, _ = StatePerformanceCalculator(min_samples=5).compute(oos_df)
+
+                for state, is_s in is_stats_w.items():
+                    if state not in oos_stats_w:
+                        continue
+                    oos_s = oos_stats_w[state]
+                    if state not in window_state_data:
+                        window_state_data[state] = []
+                    window_state_data[state].append({
+                        "window": w_idx,
+                        "is_wr":  is_s["win_rate"],
+                        "oos_wr": oos_s["win_rate"],
+                        "is_ev":  is_s["ev"],
+                        "oos_ev": oos_s["ev"],
+                        "is_n":   is_s["sample_count"],
+                        "oos_n":  oos_s["sample_count"],
+                    })
+
+            # ── Full 80/20 split for primary stats ────────────────────────
+            wfv          = WalkForwardValidator()
+            train_full, oos_full = wfv.split_data(df)
+            is_stats, pair_stats = StatePerformanceCalculator().compute(train_full)
+            oos_stats, flagged   = wfv.validate_out_of_sample(oos_full, is_stats)
+            train_period         = wfv._date_range(train_full)
+            oos_period           = wfv._date_range(oos_full)
+
+            # ── Per-state stability and flagging ──────────────────────────
+            stability   = {}
+            state_flags = {}
+
+            for state, windows in window_state_data.items():
+                is_s = is_stats.get(state, {})
+                if not is_s:
+                    continue
+
+                # Stability score: 1 - (degrade / is_wr), averaged across 5 windows
+                stab_scores = []
+                for w in windows:
+                    if w["is_wr"] > 0:
+                        stab_scores.append(1.0 - (w["is_wr"] - w["oos_wr"]) / w["is_wr"])
+                stability[state] = round(float(np.mean(stab_scores)) if stab_scores else 0.0, 3)
+
+                oos_s        = oos_stats.get(state, {})
+                degrade_80_20 = is_s.get("win_rate", 0.0) - oos_s.get("win_rate", 0.0)
+
+                flags = []
+                if degrade_80_20 > OOS_DEGRADE_LIMIT:
+                    flags.append("OVERFIT")
+                if stability[state] < 0.4:
+                    flags.append("UNRELIABLE")
+                if _trend_from_state(state) == "BULL" and oos_s.get("win_rate", 1.0) < 0.50:
+                    flags.append("REMOVE")
+                state_flags[state] = flags if flags else ["OK"]
+
+            # ── Monte Carlo ───────────────────────────────────────────────
+            state_ev  = {s: d["ev"] for s, d in is_stats.items()}
+            mc_sim    = MonteCarloSimulator(n_paths=MC_PATHS, n_steps=100)
+            equity    = mc_sim.simulate_paths(global_matrix, state_ev)
+            mc_pcts   = mc_sim.compute_equity_percentiles(equity)
+            mc_sharpe = mc_sim.sharpe_ratio(equity)
+            mc_results = {**mc_pcts, "median_sharpe": mc_sharpe}
+            ruin       = mc_results.get("probability_of_ruin", 0.0)
+
+            # ── Assemble per-state output ─────────────────────────────────
+            out_states = {}
+            for state, s in is_stats.items():
+                oos_s  = oos_stats.get(state, {})
+                entry  = dict(s)
+                entry["oos_win_rate"]    = oos_s.get("win_rate")
+                entry["oos_ev"]          = oos_s.get("ev")
+                entry["stability_score"] = stability.get(state, 0.0)
+                entry["flags"]           = state_flags.get(state, ["OK"])
+                entry["oos_flagged"]     = bool(
+                    "OVERFIT" in state_flags.get(state, []) or
+                    "REMOVE"  in state_flags.get(state, [])
+                )
+                out_states[state] = entry
+
+            # Per-key summary
+            n_states  = len(is_stats)
+            n_oos_ok  = sum(1 for f in state_flags.values()
+                           if "OVERFIT" not in f and "REMOVE" not in f)
+            n_overfit = sum(1 for f in state_flags.values() if "OVERFIT" in f)
+            n_stable  = sum(1 for v in stability.values() if v >= 0.7)
+
+            combo_out = {
+                "generated_at":       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "instrument":         inst,
+                "timeframe":          tf,
+                "total_bars":         n,
+                "total_transitions":  total_transitions,
+                "train_period":       f"{train_period[0]} to {train_period[1]}",
+                "oos_period":         f"{oos_period[0]} to {oos_period[1]}",
+                "states":             out_states,
+                "transition_pair_stats": pair_stats,
+                "monte_carlo": {
+                    "median_sharpe":            mc_sharpe,
+                    "p5_max_drawdown":          mc_results.get("p5_max_drawdown",  0),
+                    "p25_max_drawdown":         mc_results.get("p25_max_drawdown", 0),
+                    "p50_max_drawdown":         mc_results.get("p50_max_drawdown", 0),
+                    "p95_max_drawdown":         mc_results.get("p95_max_drawdown", 0),
+                    "probability_of_ruin":      ruin,
+                    "expected_r_per_100_trades": mc_results.get("expected_r_per_n_steps", 0),
+                },
+                "summary": {
+                    "n_states":       n_states,
+                    "n_oos_ok":       n_oos_ok,
+                    "n_overfit":      n_overfit,
+                    "n_stable_07":    n_stable,
+                    "sharpe":         round(mc_sharpe, 2),
+                    "ruin_pct":       round(ruin * 100, 2),
+                    "sharpe_below_threshold": mc_sharpe < tier2_min,
+                },
+            }
+            consolidated[key] = combo_out
+
+            # Save individual per-instrument stats file
+            stats_path = OUTPUTS_DIR / f"H2_state_stats_{inst}_{tf}.json"
+            with open(stats_path, "w", encoding="utf-8") as f:
+                json.dump(combo_out, f, indent=2, default=str)
+
+            summary_rows.append({
+                "instrument":  inst,
+                "tf":          tf,
+                "total_trans": total_transitions,
+                "n_states":    n_states,
+                "oos_ok":      n_oos_ok,
+                "overfit":     n_overfit,
+                "stable_07":   n_stable,
+                "sharpe":      round(mc_sharpe, 2),
+                "ruin_pct":    round(ruin * 100, 2),
+                "sharpe_warn": mc_sharpe < tier2_min,
+                "ruin_warn":   ruin * 100 > 5.0,
+            })
+            log.info(f"  {key}: {n_states} states | OOS_OK={n_oos_ok} | OVERFIT={n_overfit} "
+                     f"| Stable>=0.7={n_stable} | Sharpe={mc_sharpe:.2f} | Ruin={ruin:.2%}")
+
+        except Exception as exc:
+            log.error(f"Error processing {key}: {exc}", exc_info=True)
+            summary_rows.append({
+                "instrument": inst, "tf": tf, "total_trans": total_transitions,
+                "n_states": 0, "oos_ok": 0, "overfit": 0, "stable_07": 0,
+                "sharpe": 0.0, "ruin_pct": 0.0, "sharpe_warn": False, "ruin_warn": False,
+            })
+
+    # ── Save consolidated H2_state_stats.json ────────────────────────────
+    consolidated_path = OUTPUTS_DIR / "H2_state_stats.json"
+    with open(consolidated_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "generated_at":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "method":          "walk_forward_5_windows",
+            "window_splits":   ["0-20/20-40", "0-40/40-60", "0-60/60-80", "0-80/80-90", "0-90/90-100"],
+            "min_transitions": min_transitions,
+            "instruments":     consolidated,
+        }, f, indent=2, default=str)
+    log.info(f"Saved consolidated state stats: {consolidated_path}")
+
+    # ── Print console table ───────────────────────────────────────────────
+    sep = "=" * 90
+    print(f"\n{sep}")
+    print("  WALK-FORWARD VALIDATION REPORT — ALL INSTRUMENTS")
+    print(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    print(sep)
+    print(f"  {'INSTRUMENT':<10} {'TF':<5} {'TRANS':>7} {'STATES':>6} {'OOS_OK':>7} "
+          f"{'OVERFIT':>7} {'STABLE>0.7':>10} {'SHARPE':>7} {'RUIN%':>7}")
+    print(f"  {'-'*88}")
+    for row in summary_rows:
+        s_flag = " !" if row["sharpe_warn"] else "  "
+        r_flag = " !" if row["ruin_warn"]   else "  "
+        print(f"  {row['instrument']:<10} {row['tf']:<5} {row['total_trans']:>7,} "
+              f"{row['n_states']:>6} {row['oos_ok']:>7} {row['overfit']:>7} "
+              f"{row['stable_07']:>10} {row['sharpe']:>7.2f}{s_flag} {row['ruin_pct']:>5.1f}%{r_flag}")
+
+    # Sharpe warnings
+    low_sharpe = [r for r in summary_rows if r["sharpe_warn"] and r["n_states"] > 0]
+    if low_sharpe:
+        print(f"\n  !  SHARPE BELOW {tier2_min:.1f} (Tier 2 minimum):")
+        for r in low_sharpe:
+            action = "EXCLUDE" if r["sharpe"] < 2.0 else "REVIEW"
+            print(f"     {r['instrument']} {r['tf']} - Sharpe {r['sharpe']:.2f} -> {action}")
+
+    # Ruin warnings
+    high_ruin = [r for r in summary_rows if r["ruin_warn"] and r["n_states"] > 0]
+    if high_ruin:
+        print(f"\n  !  RUIN PROBABILITY > 5.0%:")
+        for r in high_ruin:
+            print(f"     {r['instrument']} {r['tf']} - Ruin {r['ruin_pct']:.1f}%")
+
+    print(f"\n  Processed : {len(summary_rows)} combinations")
+    print(f"  Skipped   : {len(skipped)} (< {min_transitions} transitions)")
+    if skipped:
+        for s in skipped[:10]:
+            print(f"    — {s}")
+    print(sep)
+
+    # ── Save H2_walkforward_report.md ─────────────────────────────────────
+    _save_walkforward_markdown(summary_rows, skipped, consolidated, min_transitions, tier2_min)
+    log.info("Walk-forward validation complete.")
+
+
+def _save_walkforward_markdown(
+    summary_rows: list,
+    skipped: list,
+    consolidated: dict,
+    min_transitions: int,
+    tier2_min: float = 3.0,
+) -> None:
+    """Save outputs/H2_walkforward_report.md — consolidated markdown report."""
+    now_utc = datetime.now(timezone.utc)
+    now_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+
+    lines = [
+        "# H2 Walk-Forward Validation Report",
+        f"*Generated: {now_str}*",
+        f"*Min transitions: {min_transitions} | Windows: 5 (20/20, 40/20, 60/20, 80/10, 90/10)*",
+        "",
+        "---",
+        "",
+        "## Summary Table",
+        "",
+        "| # | Instrument | TF | Transitions | States | OOS OK | OVERFIT | Stable≥0.7 | Sharpe | Ruin% |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+
+    for i, row in enumerate(summary_rows, 1):
+        sf = " ⚠" if row["sharpe_warn"] else ""
+        rf = " ⚠" if row["ruin_warn"]   else ""
+        lines.append(
+            f"| {i} | **{row['instrument']}** | {row['tf']} | {row['total_trans']:,} | "
+            f"{row['n_states']} | {row['oos_ok']} | {row['overfit']} | {row['stable_07']} | "
+            f"{row['sharpe']:.2f}{sf} | {row['ruin_pct']:.1f}%{rf} |"
+        )
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## Flags Legend",
+        "",
+        "| Flag | Condition | Meaning |",
+        "|---|---|---|",
+        "| **OVERFIT** | OOS WR degraded > 15pp vs in-sample | State over-fitted to training data |",
+        "| **UNRELIABLE** | Stability score < 0.4 | Inconsistent across walk-forward windows |",
+        "| **REMOVE** | OOS WR < 50% on BULL_ state | Bullish bias has no OOS edge |",
+        "| **OK** | No flags | State validated and tradeable |",
+        "",
+        "---",
+        "",
+        "## Window Methodology",
+        "",
+        "| Window | Train Period | Test Period |",
+        "|---|---|---|",
+        "| W1 | 0–20% of bars | 20–40% |",
+        "| W2 | 0–40% of bars | 40–60% |",
+        "| W3 | 0–60% of bars | 60–80% |",
+        "| W4 | 0–80% of bars | 80–90% |",
+        "| W5 | 0–90% of bars | 90–100% |",
+        "",
+        "**Stability score per state:**",
+        "```",
+        "stability_i  = 1 - (in_sample_WR - OOS_WR) / in_sample_WR   [per window]",
+        "final_score  = mean(stability_i across all 5 windows)",
+        "```",
+        "- score ≥ 0.7 → Tradeable",
+        "- score 0.4–0.7 → Marginal",
+        "- score < 0.4 → UNRELIABLE — flag and avoid",
+        "",
+        "---",
+        "",
+    ]
+
+    low_sharpe = [r for r in summary_rows if r["sharpe_warn"] and r["n_states"] > 0]
+    high_ruin  = [r for r in summary_rows if r["ruin_warn"]   and r["n_states"] > 0]
+
+    lines += [f"## Instruments Below Sharpe {tier2_min:.1f} Threshold", ""]
+    if low_sharpe:
+        lines += [
+            "| Instrument | TF | Sharpe | Action |",
+            "|---|---|---|---|",
+        ]
+        for r in low_sharpe:
+            action = "**EXCLUDE**" if r["sharpe"] < 2.0 else "REVIEW"
+            lines.append(f"| {r['instrument']} | {r['tf']} | {r['sharpe']:.2f} | {action} |")
+    else:
+        lines.append(f"*All instruments meet the Sharpe ≥ {tier2_min:.1f} threshold.*")
+
+    lines += ["", "---", "", "## High Ruin Probability (> 5%)", ""]
+    if high_ruin:
+        lines += [
+            "| Instrument | TF | Ruin% | Action |",
+            "|---|---|---|---|",
+        ]
+        for r in high_ruin:
+            action = "**EXCLUDE**" if r["ruin_pct"] > 14.0 else "REDUCE SIZE"
+            lines.append(f"| {r['instrument']} | {r['tf']} | {r['ruin_pct']:.1f}% | {action} |")
+    else:
+        lines.append("*All instruments have ruin probability ≤ 5%.*")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## Skipped (Insufficient Transitions)",
+        "",
+        f"*{len(skipped)} combinations had fewer than {min_transitions} transitions:*",
+        "",
+    ]
+    for s in skipped:
+        lines.append(f"- {s}")
+
+    lines += ["", "---", "", "## Per-Instrument Detail", ""]
+
+    for key, data in consolidated.items():
+        inst = data["instrument"]
+        tf   = data["timeframe"]
+        mc   = data.get("monte_carlo", {})
+        sm   = data.get("summary", {})
+        lines += [
+            f"### {inst} {tf}",
+            "",
+            f"- **Period**: {data['train_period']} (train) → {data['oos_period']} (OOS 20%)",
+            f"- **Bars**: {data['total_bars']:,} | **Transitions**: {data['total_transitions']:,}",
+            f"- **States**: {sm.get('n_states', 0)} | OOS OK: {sm.get('n_oos_ok', 0)} "
+            f"| OVERFIT: {sm.get('n_overfit', 0)} | Stable≥0.7: {sm.get('n_stable_07', 0)}",
+            f"- **Sharpe**: {mc.get('median_sharpe', 0):.2f} "
+            f"| **Ruin**: {mc.get('probability_of_ruin', 0):.2%}",
+            f"- **Max DD** (p5/p50/p95): {mc.get('p5_max_drawdown', 0):.1f}R "
+            f"/ {mc.get('p50_max_drawdown', 0):.1f}R / {mc.get('p95_max_drawdown', 0):.1f}R",
+            "",
+        ]
+
+        states = data.get("states", {})
+        if states:
+            top5 = sorted(states.items(), key=lambda x: x[1].get("ev", 0), reverse=True)[:5]
+            lines += [
+                "**Top 5 states by in-sample EV:**",
+                "",
+                "| State | IS WR | IS EV | OOS WR | OOS EV | Stability | Flags |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for state, s in top5:
+                oos_wr = s.get("oos_win_rate")
+                oos_ev = s.get("oos_ev")
+                stab   = s.get("stability_score", 0.0)
+                flags  = ", ".join(s.get("flags", ["OK"]))
+                wr_str = f"{oos_wr:.1%}" if oos_wr is not None else "—"
+                ev_str = f"{oos_ev:+.3f}" if oos_ev is not None else "—"
+                short  = state if len(state) <= 42 else state[:39] + "..."
+                lines.append(
+                    f"| `{short}` | {s.get('win_rate', 0):.1%} | {s.get('ev', 0):+.3f} | "
+                    f"{wr_str} | {ev_str} | {stab:.2f} | {flags} |"
+                )
+            lines.append("")
+
+    lines += [
+        "---",
+        "",
+        f"*H2 Quant System v1 · Walk-Forward Report · {now_str}*",
+        "",
+    ]
+
+    report_path = OUTPUTS_DIR / "H2_walkforward_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    log.info(f"Saved: {report_path}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="H2 Quant — Research Validator (Phase 5)")
-    parser.add_argument("--instrument", "-i")
-    parser.add_argument("--timeframe",  "-t")
-    parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--instrument",      "-i",  help="Single instrument (e.g. US30)")
+    parser.add_argument("--timeframe",       "-t",  help="Timeframe (e.g. 1H)")
+    parser.add_argument("--batch",           action="store_true",
+                        help="Run validate() on all instruments (existing batch mode)")
+    parser.add_argument("--all-instruments", action="store_true",
+                        help="Walk-forward validation across ALL instruments/TFs")
+    parser.add_argument("--walk-forward",    action="store_true",
+                        help="Alias for --all-instruments (spec walk-forward mode)")
+    parser.add_argument("--min-transitions", type=int, default=200,
+                        help="Min transitions required to include an instrument (default: 200)")
     args = parser.parse_args()
 
-    if args.batch:
+    if args.all_instruments or args.walk_forward:
+        validate_all_walk_forward(min_transitions=args.min_transitions)
+        print("\nPhase 5 walk-forward complete. Outputs saved to outputs/ directory.")
+    elif args.batch:
         validate_batch()
         print("\nPhase 5 complete. Ready for Phase 6 — Briefing Generator.")
     elif args.instrument and args.timeframe:

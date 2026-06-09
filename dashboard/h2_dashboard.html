@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>H2 Quant — Live State Dashboard</title>
+  <style>
+    /* ── Reset & base ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:           #0d1117;
+      --bg-card:      #161b22;
+      --bg-card-alt:  #1c2128;
+      --border:       #30363d;
+      --border-light: #21262d;
+      --text:         #e6edf3;
+      --text-muted:   #8b949e;
+      --text-dim:     #484f58;
+
+      /* conviction / tier colours */
+      --gold:         #ffd700;
+      --gold-bg:      rgba(255,215,0,0.12);
+      --green:        #3fb950;
+      --green-bg:     rgba(63,185,80,0.12);
+      --orange:       #e3b341;
+      --orange-bg:    rgba(227,179,65,0.12);
+      --red:          #f85149;
+      --red-bg:       rgba(248,81,73,0.12);
+      --gray:         #6e7681;
+      --gray-bg:      rgba(110,118,129,0.10);
+
+      /* state direction colours */
+      --bull:         #26a69a;
+      --bear:         #ef5350;
+      --neutral-col:  #7e8c8d;
+
+      /* gate pill */
+      --gate-pass-bg: rgba(46,160,67,0.18);
+      --gate-pass:    #2ea043;
+      --gate-fail-bg: rgba(218,54,51,0.15);
+      --gate-fail:    #da3633;
+    }
+
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────────── */
+    header {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: var(--gold);
+    }
+    .logo span { color: var(--text-muted); font-weight: 400; font-size: 13px; }
+    .header-meta { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .session-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      border: 1px solid;
+    }
+    .refresh-info {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .refresh-info strong { color: var(--text); }
+    #countdown {
+      display: inline-block;
+      width: 28px;
+      text-align: right;
+      color: var(--gold);
+      font-weight: 700;
+    }
+
+    /* ── Main grid ─────────────────────────────────────────────────────── */
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px 16px 40px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: 16px;
+    }
+
+    /* ── Instrument card ───────────────────────────────────────────────── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .card:hover { border-color: #484f58; }
+    .card.highlight-gold  { border-color: var(--gold);   box-shadow: 0 0 0 1px var(--gold); }
+    .card.highlight-green { border-color: var(--green);  box-shadow: 0 0 0 1px var(--green); }
+
+    /* card header strip */
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .inst-name {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+    }
+    .inst-name.bull    { color: var(--bull); }
+    .inst-name.bear    { color: var(--bear); }
+    .inst-name.neutral { color: var(--text-muted); }
+
+    .conviction-badge {
+      font-size: 13px;
+      font-weight: 800;
+      padding: 3px 11px;
+      border-radius: 20px;
+      letter-spacing: 0.3px;
+    }
+    .conv-Aplus  { background: var(--gold-bg);  color: var(--gold);  border: 1px solid var(--gold); }
+    .conv-A      { background: var(--green-bg); color: var(--green); border: 1px solid var(--green); }
+    .conv-B      { background: var(--orange-bg);color: var(--orange);border: 1px solid var(--orange); }
+    .conv-SKIP,
+    .conv-default{ background: var(--gray-bg);  color: var(--gray);  border: 1px solid #484f58; }
+
+    /* card body */
+    .card-body { padding: 12px 14px; }
+
+    /* state ID */
+    .state-id {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 10.5px;
+      color: var(--text-muted);
+      word-break: break-all;
+      margin-bottom: 6px;
+      line-height: 1.6;
+    }
+    .state-part { padding: 1px 4px; border-radius: 3px; margin: 1px; display: inline-block; }
+    .sp-trend-bull    { background: rgba(38,166,154,0.18); color: var(--bull); }
+    .sp-trend-bear    { background: rgba(239,83,80,0.18);  color: var(--bear); }
+    .sp-trend-neutral { background: var(--gray-bg); color: var(--gray); }
+    .sp-default       { background: var(--bg-card-alt); color: var(--text-muted); }
+    .sp-structure-bos    { background: rgba(38,166,154,0.18); color: var(--bull); }
+    .sp-structure-choch  { background: rgba(227,179,65,0.20);  color: var(--orange); }
+    .sp-structure-mss    { background: rgba(248,81,73,0.18);   color: var(--red); }
+    .sp-rsi-ob { background: rgba(248,81,73,0.18); color: var(--red); }
+    .sp-rsi-os { background: rgba(38,166,154,0.18); color: var(--bull); }
+
+    /* description */
+    .description {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      line-height: 1.5;
+      min-height: 32px;
+    }
+
+    /* ── Section label ─────────────────────────────────────────────────── */
+    .section-label {
+      font-size: 9.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-dim);
+      margin: 10px 0 6px;
+    }
+
+    /* ── Pillars ────────────────────────────────────────────────────────── */
+    .pillars-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .pillar-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .pillar-dot.filled { background: var(--gold); }
+    .pillar-dot.empty  { background: var(--border); }
+    .pillars-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: 4px;
+    }
+
+    /* ── Gates ──────────────────────────────────────────────────────────── */
+    .gates-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .gate-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 8px;
+      border-radius: 5px;
+      font-size: 10.5px;
+      font-weight: 500;
+    }
+    .gate-pill.pass { background: var(--gate-pass-bg); color: var(--gate-pass); }
+    .gate-pill.fail { background: var(--gate-fail-bg); color: var(--gate-fail); }
+    .gate-name { font-weight: 600; }
+    .gate-val  { font-family: monospace; font-size: 10px; opacity: 0.85; }
+
+    /* ── Next states ────────────────────────────────────────────────────── */
+    .next-states { display: flex; flex-direction: column; gap: 6px; }
+    .next-state-row { display: flex; flex-direction: column; gap: 2px; }
+    .next-state-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .next-state-name {
+      font-size: 10px;
+      font-family: monospace;
+      color: var(--text-muted);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .next-state-meta {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+      align-items: baseline;
+    }
+    .prob-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .ev-label {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .ev-label.pos { color: var(--green); }
+    .ev-label.neg { color: var(--red); }
+    .prob-bar-track {
+      height: 3px;
+      background: var(--border-light);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .prob-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.6s ease;
+    }
+    .prob-bar-fill.rank1 { background: var(--gold); }
+    .prob-bar-fill.rank2 { background: var(--text-muted); }
+    .prob-bar-fill.rank3 { background: var(--border); }
+
+    /* ── Stats row ──────────────────────────────────────────────────────── */
+    .stats-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-light);
+    }
+    .stat-block { flex: 1; text-align: center; }
+    .stat-val {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      display: block;
+    }
+    .stat-val.positive { color: var(--green); }
+    .stat-val.negative { color: var(--red); }
+    .stat-key {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-dim);
+      display: block;
+      margin-top: 1px;
+    }
+
+    /* ── Session / dwell footer ─────────────────────────────────────────── */
+    .card-footer {
+      background: var(--bg-card-alt);
+      border-top: 1px solid var(--border-light);
+      padding: 8px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+
+    /* ── Error / loading states ─────────────────────────────────────────── */
+    .status-bar {
+      text-align: center;
+      padding: 8px 20px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .status-bar.ok      { color: var(--green); }
+    .status-bar.loading { color: var(--text-muted); }
+    .status-bar.error   { color: var(--red); background: var(--red-bg); border-radius: 6px; }
+
+    /* ── Skeleton loader ────────────────────────────────────────────────── */
+    .skeleton {
+      background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-card-alt) 50%, var(--bg-card) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 4px;
+      height: 14px;
+      margin: 6px 0;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ── Responsive ─────────────────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      .grid { grid-template-columns: 1fr; }
+      .gates-grid { grid-template-columns: 1fr 1fr; }
+      header { padding: 10px 14px; }
+      .logo { font-size: 16px; }
+    }
+    @media (max-width: 360px) {
+      .gates-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo">H2 Quant <span>Live State</span></div>
+    <span id="session-badge" class="session-badge" style="border-color:#484f58;color:#8b949e">—</span>
+  </div>
+  <div class="header-meta">
+    <div class="refresh-info">
+      Data: <strong id="data-time">—</strong>
+      &nbsp;·&nbsp;
+      Refresh in <span id="countdown">60</span>s
+    </div>
+  </div>
+</header>
+
+<!-- ── Status bar ──────────────────────────────────────────────────────── -->
+<div id="status-bar" class="status-bar loading">Loading H2 live state…</div>
+
+<!-- ── Instrument grid ─────────────────────────────────────────────────── -->
+<main>
+  <div class="grid" id="grid">
+    <!-- cards injected by JS -->
+  </div>
+</main>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────
+const API_URL       = "/api/live-state";
+const REFRESH_SEC   = 60;
+const TIER1_ORDER   = ["US30","GBPUSD","DE40","XAUUSD","GBPJPY","EURJPY"];
+
+// ── Gate config: {key in JSON, label, op, threshold} ──────────────────────
+const GATES = [
+  { key: "markov_gap",         label: "Gap",   op: ">=", thr: 0.61 },
+  { key: "markov_persistence", label: "Pers",  op: ">=", thr: 0.82 },
+  { key: "volatility_cap",     label: "Vol",   op: "<=", thr: 1.25 },
+  { key: "hurst",              label: "Hurst", op: ">=", thr: 0.50 },
+  { key: "session",            label: "Sess",  op: "bool", thr: null },
+];
+
+// ── Session badge colours ─────────────────────────────────────────────────
+const SESSION_COLOUR = {
+  TOKYO:    { bg: "rgba(63,185,80,0.15)",    border: "#2ea043", text: "#3fb950" },
+  LONDON:   { bg: "rgba(63,130,220,0.15)",   border: "#3880dc", text: "#58a6ff" },
+  NY:       { bg: "rgba(255,215,0,0.15)",    border: "#d4a017", text: "#ffd700" },
+  OVERLAP:  { bg: "rgba(227,179,65,0.15)",   border: "#e3b341", text: "#e3b341" },
+  OFFHOURS: { bg: "rgba(110,118,129,0.10)",  border: "#484f58", text: "#8b949e" },
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function convClass(c) {
+  if (c === "A+") return "conv-Aplus";
+  if (c === "A")  return "conv-A";
+  if (c === "B")  return "conv-B";
+  return "conv-SKIP";
+}
+
+function trendClass(state) {
+  if (!state) return "neutral";
+  const t = state.split("_")[0];
+  if (t === "BULL") return "bull";
+  if (t === "BEAR") return "bear";
+  return "neutral";
+}
+
+function colourStateId(state) {
+  if (!state) return '<span class="state-part sp-default">UNKNOWN</span>';
+  const parts = state.split("_");
+  return parts.map((p, i) => {
+    let cls = "sp-default";
+    if (i === 0) {
+      cls = p === "BULL" ? "sp-trend-bull" : p === "BEAR" ? "sp-trend-bear" : "sp-trend-neutral";
+    } else if (i === 5) {  // STRUCTURE
+      cls = p === "BOS" ? "sp-structure-bos"
+          : p === "CHOCH" ? "sp-structure-choch"
+          : p === "MSS"   ? "sp-structure-mss"
+          : "sp-default";
+    } else if (i === 6) {  // RSI
+      cls = p === "OB" ? "sp-rsi-ob" : p === "OS" ? "sp-rsi-os" : "sp-default";
+    }
+    return `<span class="state-part ${cls}">${esc(p)}</span>`;
+  }).join("");
+}
+
+function gatePass(g) {
+  if (!g) return false;
+  // session gate stores .pass bool directly
+  if (g.pass !== undefined) return !!g.pass;
+  const v = g.value ?? 0;
+  return v !== 0;   // non-zero means evaluated; actual pass/fail via gate config
+}
+
+function gatePassFull(gate, gObj) {
+  if (!gObj) return false;
+  if (gate.op === "bool") return !!gObj.pass;
+  const v = parseFloat(gObj.value ?? 0);
+  if (gate.op === ">=") return v >= gate.thr;
+  if (gate.op === "<=") return v <= gate.thr;
+  return false;
+}
+
+function fmtGateVal(gate, gObj) {
+  if (!gObj) return "—";
+  if (gate.op === "bool") return gObj.pass ? "OK" : "FAIL";
+  const v = parseFloat(gObj.value ?? 0);
+  return v.toFixed(2);
+}
+
+function pillarDots(n, total = 4) {
+  let html = "";
+  for (let i = 0; i < total; i++) {
+    html += `<span class="pillar-dot ${i < n ? "filled" : "empty"}"></span>`;
+  }
+  return html;
+}
+
+function fmtWR(v) {
+  return v > 0 ? `${(v * 100).toFixed(0)}%` : "—";
+}
+function fmtEV(v) {
+  if (!v) return "—";
+  return (v >= 0 ? "+" : "") + v.toFixed(2) + "R";
+}
+function evClass(v) { return v > 0 ? "positive" : v < 0 ? "negative" : ""; }
+function evLabelClass(v) { return v > 0 ? "pos" : v < 0 ? "neg" : ""; }
+
+function sessionStyle(session) {
+  const c = SESSION_COLOUR[session] || SESSION_COLOUR["OFFHOURS"];
+  return `background:${c.bg};border-color:${c.border};color:${c.text}`;
+}
+
+// ── Build one instrument card ─────────────────────────────────────────────
+function buildCard(instrument, data) {
+  const state       = data.current_state ?? "UNKNOWN";
+  const desc        = data.state_description ?? "";
+  const conv        = data.conviction ?? "SKIP";
+  const pillars     = parseInt(data.pillars_confirmed ?? 0);
+  const histWR      = parseFloat(data.historical_wr ?? 0);
+  const histEV      = parseFloat(data.historical_ev ?? 0);
+  const samples     = parseInt(data.sample_count ?? 0);
+  const dwellAvg    = parseFloat(data.dwell_time_avg_bars ?? 0);
+  const session     = data.session ?? "OFFHOURS";
+  const nextStates  = data.next_states ?? [];
+  const gates       = data.gates ?? {};
+
+  const tc = trendClass(state);
+  const allGatesPass = GATES.every(g => gatePassFull(g, gates[g.key]));
+
+  // Card highlight for A+/A
+  let highlight = "";
+  if (conv === "A+") highlight = "highlight-gold";
+  else if (conv === "A") highlight = "highlight-green";
+
+  // ── Gate pills HTML ─────────────────────────────────────────────────────
+  const gatePills = GATES.map(g => {
+    const gObj = gates[g.key];
+    const pass = gatePassFull(g, gObj);
+    const val  = fmtGateVal(g, gObj);
+    return `<div class="gate-pill ${pass ? "pass" : "fail"}">
+      <span class="gate-name">${g.label}</span>
+      <span class="gate-val">${val}</span>
+    </div>`;
+  }).join("");
+
+  // ── Next states HTML ────────────────────────────────────────────────────
+  const topNS = nextStates.slice(0, 3);
+  const nextHTML = topNS.map((ns, idx) => {
+    const prob = parseFloat(ns.probability ?? 0);
+    const ev   = parseFloat(ns.ev ?? 0);
+    const pct  = Math.round(prob * 100);
+    const rankClass = idx === 0 ? "rank1" : idx === 1 ? "rank2" : "rank3";
+    return `<div class="next-state-row">
+      <div class="next-state-top">
+        <span class="next-state-name" title="${esc(ns.state)}">${esc(ns.state ?? "—")}</span>
+        <span class="next-state-meta">
+          <span class="prob-label">${pct}%</span>
+          <span class="ev-label ${evLabelClass(ev)}">${fmtEV(ev)}</span>
+        </span>
+      </div>
+      <div class="prob-bar-track">
+        <div class="prob-bar-fill ${rankClass}" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+  }).join("") || `<span style="color:var(--text-dim);font-size:11px">No transitions available yet</span>`;
+
+  return `
+<div class="card ${highlight}">
+  <div class="card-header">
+    <span class="inst-name ${tc}">${esc(instrument)}</span>
+    <span class="conviction-badge ${convClass(conv)}">${esc(conv)}</span>
+  </div>
+  <div class="card-body">
+
+    <div class="state-id">${colourStateId(state)}</div>
+    <div class="description">${esc(desc) || '<span style="color:var(--text-dim)">No description</span>'}</div>
+
+    <div class="section-label">Pillars</div>
+    <div class="pillars-row">
+      ${pillarDots(pillars)}
+      <span class="pillars-label">${pillars}/4 confirmed${allGatesPass ? " · all gates pass" : ""}</span>
+    </div>
+
+    <div class="section-label">Gates</div>
+    <div class="gates-grid">${gatePills}</div>
+
+    <div class="section-label">Next States</div>
+    <div class="next-states">${nextHTML}</div>
+
+    <div class="stats-row">
+      <div class="stat-block">
+        <span class="stat-val ${evClass(histWR - 0.5)}">${fmtWR(histWR)}</span>
+        <span class="stat-key">Win Rate</span>
+      </div>
+      <div class="stat-block">
+        <span class="stat-val ${evClass(histEV)}">${fmtEV(histEV)}</span>
+        <span class="stat-key">Hist EV</span>
+      </div>
+      <div class="stat-block">
+        <span class="stat-val">${samples > 0 ? samples.toLocaleString() : "—"}</span>
+        <span class="stat-key">Samples</span>
+      </div>
+      <div class="stat-block">
+        <span class="stat-val">${dwellAvg > 0 ? dwellAvg.toFixed(1) : "—"}</span>
+        <span class="stat-key">Dwell avg</span>
+      </div>
+    </div>
+
+  </div>
+  <div class="card-footer">
+    <span>Session: <strong>${esc(session)}</strong></span>
+    <span style="color:var(--text-dim)">${samples} samples · dwell ${dwellAvg > 0 ? dwellAvg.toFixed(1) : "—"} bars</span>
+  </div>
+</div>`;
+}
+
+// ── Render all cards ──────────────────────────────────────────────────────
+function render(data) {
+  const grid      = document.getElementById("grid");
+  const instruments = data.instruments ?? {};
+
+  // Respect TIER1_ORDER; also include anything extra in data
+  const extra = Object.keys(instruments).filter(k => !TIER1_ORDER.includes(k));
+  const order = [...TIER1_ORDER, ...extra];
+
+  grid.innerHTML = order
+    .filter(k => instruments[k])
+    .map(k => buildCard(k, instruments[k]))
+    .join("");
+
+  // Header session badge
+  const session = data.session ?? "OFFHOURS";
+  const badge = document.getElementById("session-badge");
+  badge.textContent = session;
+  badge.style = "font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;"
+              + "letter-spacing:0.6px;text-transform:uppercase;border:1px solid;"
+              + sessionStyle(session);
+
+  // Data timestamp
+  const sast = data.generated_at_sast ?? "";
+  document.getElementById("data-time").textContent = sast ? sast.slice(11, 16) + " SAST" : "—";
+
+  // Status
+  const statusBar = document.getElementById("status-bar");
+  const total     = Object.keys(instruments).length;
+  const aplus     = Object.values(instruments).filter(d => d.conviction === "A+").length;
+  const aconv     = Object.values(instruments).filter(d => d.conviction === "A").length;
+  statusBar.className = "status-bar ok";
+  statusBar.textContent =
+    `${total} instruments loaded  ·  A+ signals: ${aplus}  ·  A signals: ${aconv}  ·  ${session} session`;
+}
+
+// ── Fetch + update ────────────────────────────────────────────────────────
+async function fetchAndRender() {
+  const statusBar = document.getElementById("status-bar");
+  try {
+    const resp = await fetch(API_URL + "?t=" + Date.now());
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    render(data);
+  } catch (e) {
+    statusBar.className = "status-bar error";
+    statusBar.textContent = "Error loading data: " + e.message;
+    console.error(e);
+  }
+}
+
+// ── Countdown + auto-refresh ──────────────────────────────────────────────
+let timeLeft = REFRESH_SEC;
+const countdownEl = document.getElementById("countdown");
+
+setInterval(() => {
+  timeLeft--;
+  countdownEl.textContent = timeLeft;
+  if (timeLeft <= 0) {
+    timeLeft = REFRESH_SEC;
+    fetchAndRender();
+  }
+}, 1000);
+
+// ── Initial load ──────────────────────────────────────────────────────────
+fetchAndRender();
+</script>
+</body>
+</html>
