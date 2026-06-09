@@ -69,6 +69,47 @@ GATE_VOL    = CFG["gates"]["volatility_cap_multiplier"]         # 1.25
 GATE_HURST  = CFG["gates"]["hurst_threshold"]                   # 0.50
 SESSION_GATES = CFG.get("session_gates", {})
 
+# ── Walk-forward validated signal combos ─────────────────────────────────────
+# Built from config.yaml signal_combos and excluded_combos sections.
+# Loaded once at startup so the monitor loop pays no per-cycle cost.
+
+def _build_combo_sets() -> tuple[set, set, set, set]:
+    """
+    Returns four sets of (instrument, timeframe) tuples:
+      PRIMARY_COMBOS   — tier1_primary: full signal generation eligible
+      ENTRY_TF_COMBOS  — entry_timing: confirm 1H timing only, no primary signal
+      BIAS_COMBOS      — bias_only: direction filter, never fire signal
+      EXCLUDED_COMBOS  — never generate signals, skip webhook/WhatsApp
+    """
+    sc = CFG.get("signal_combos", {})
+    ex = CFG.get("excluded_combos", [])
+
+    def _set(key):
+        return {(inst, tf) for inst, tf in sc.get(key, [])}
+
+    primary  = _set("tier1_primary")
+    entry    = _set("entry_timing")
+    bias     = _set("bias_only")
+    excluded = set()
+    for item in ex:
+        inst, tf = item[0], item[1]
+        if tf == "all":
+            # Expand "all" to every known timeframe
+            for _tf in ("15m", "1H", "4H", "D"):
+                excluded.add((inst, _tf))
+        else:
+            excluded.add((inst, tf))
+
+    return primary, entry, bias, excluded
+
+PRIMARY_COMBOS, ENTRY_TF_COMBOS, BIAS_COMBOS, EXCLUDED_COMBOS = _build_combo_sets()
+
+# State quality thresholds from config
+_SQ = CFG.get("state_quality", {})
+MIN_STABILITY_SIGNAL  = _SQ.get("min_stability_for_primary", 0.40)
+MIN_OOS_WR_SIGNAL     = _SQ.get("min_oos_wr_for_primary",    0.50)
+PULLBACK_CONV_CAP     = _SQ.get("pullback_neutral_conviction_cap", "A")
+
 SIGNAL_LOG_PATH  = OUTPUTS_DIR / "H2_signal_log.csv"
 LIVE_STATE_PATH  = OUTPUTS_DIR / "H2_live_state.json"
 
@@ -695,6 +736,19 @@ def process_instrument(
     now_sast = now_utc + SAST_OFFSET
     session  = _current_session(now_utc.hour)
 
+    # ── 0. Walk-forward combo gate ────────────────────────────────────────────
+    combo = (instrument, LIVE_TF)
+    if combo in EXCLUDED_COMBOS:
+        log.debug(f"{instrument} {LIVE_TF}: excluded combo — skipping signal generation")
+        return {}, None
+
+    # Determine signal role for this combo
+    is_primary    = combo in PRIMARY_COMBOS
+    is_entry_tf   = combo in ENTRY_TF_COMBOS
+    is_bias_only  = combo in BIAS_COMBOS
+    # Combos not in any validated set are classified+logged but never fire
+    signals_eligible = is_primary
+
     # ── 1. Fetch bars ─────────────────────────────────────────────────────────
     df = fetch_bars(instrument, LIVE_TF, n_bars=LOOKBACK)
     if df is None or df.empty:
@@ -791,6 +845,11 @@ def process_instrument(
         "stability_score":       round(stability, 3),
         "ruin_pct":              round(ruin_pct,  2),
         "dwell_time_avg_bars":   dwell_avg,
+        "signal_role":           ("primary" if is_primary else
+                                  "entry_timing" if is_entry_tf else
+                                  "bias_only" if is_bias_only else
+                                  "classify_only"),
+        "state_flags":           state_flags,
     }
 
     # ── 11. Webhook + signal log ──────────────────────────────────────────────
@@ -798,8 +857,36 @@ def process_instrument(
     whatsapp_sent = False
     signal_payload = None
 
-    should_fire = (all_gates_pass and conviction in ("A+", "A") and
-                   samples >= 30 and hist_ev > 0)
+    # ── Walk-forward quality gates ────────────────────────────────────────────
+    # 1. Combo must be in primary signal set
+    # 2. Current state must meet minimum stability and OOS WR from validation
+    oos_wr    = ss.get("oos_win_rate") or 0.0
+    state_flags = ss.get("flags", ["OK"])
+    state_ok  = (
+        stability >= MIN_STABILITY_SIGNAL and
+        oos_wr    >= MIN_OOS_WR_SIGNAL and
+        "REMOVE"  not in state_flags and
+        "OVERFIT" not in state_flags
+    )
+
+    # 3. Cap PULLBACK_NEUTRAL conviction — never A+ regardless of pillars
+    state_parts = state_id.split("_")
+    is_pullback_neutral = (
+        len(state_parts) >= 7 and
+        state_parts[5] == "PULLBACK" and state_parts[6] == "NEUTRAL"
+    )
+    if is_pullback_neutral and conviction == "A+":
+        conviction = PULLBACK_CONV_CAP   # cap to "A"
+        log.debug(f"{instrument}: PULLBACK_NEUTRAL capped to {PULLBACK_CONV_CAP}")
+
+    should_fire = (
+        signals_eligible and
+        all_gates_pass and
+        conviction in ("A+", "A") and
+        samples >= 30 and
+        hist_ev > 0 and
+        state_ok
+    )
 
     if should_fire:
         signal_payload = build_webhook_payload(

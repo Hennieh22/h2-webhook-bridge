@@ -13,6 +13,105 @@ instruments:
   primary:       [JP225, DE40, UK100, USTEC, US30, HK50]
   forex:         [EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURJPY, GBPJPY, XAUUSD, XAGUSD]
 
+# ── Walk-forward validated signal combos (updated 2026-06-09) ─────────────────
+# Source: py -3 research/validator.py --all-instruments --walk-forward
+# Only combos listed here are eligible for live signal generation.
+# Excluded combos are still classified and logged but never fire webhooks.
+
+signal_combos:
+
+  # PRIMARY — generate full signals (A/A+ conviction eligible)
+  # All Sharpe >= 3.0, ruin <= 2.1%
+  tier1_primary:
+    - [US30,   1H]   # Sharpe 15.08  ruin 0.1%
+    - [GBPUSD, 1H]   # Sharpe  7.85  ruin 0.2%
+    - [UK100,  1H]   # Sharpe  9.14  ruin 1.1%
+    - [DE40,   1H]   # Sharpe  7.13  ruin 1.6%
+    - [USTEC,  1H]   # Sharpe  7.65  ruin 0.0%
+    - [XAUUSD, 1H]   # Sharpe  7.22  ruin 1.1%
+    - [XAUUSD, 4H]   # Sharpe 12.23  ruin 0.0%
+    - [USTEC,  4H]   # Sharpe 11.91  ruin 0.0%
+    - [EURJPY, 1H]   # Sharpe  4.28  ruin 0.0%
+    - [EURUSD, 1H]   # Sharpe  4.22  ruin 0.1%
+    - [GBPJPY, 1H]   # Sharpe  3.11  ruin 0.0%
+    - [USDJPY, 1H]   # Sharpe  3.83  ruin 2.1%
+    - [XAGUSD, 1H]   # Sharpe  3.93  ruin 0.0%
+
+  # ENTRY TIMING ONLY — confirm 1H signal timing, no primary signals
+  entry_timing:
+    - [GBPUSD, 15m]  # Sharpe 22.97
+    - [EURUSD, 15m]  # Sharpe 21.64
+    - [GBPJPY, 15m]  # Sharpe 15.28
+
+  # BIAS ONLY — 4H direction filter, never generate entry signals
+  bias_only:
+    - [EURJPY, 4H]   # Sharpe  8.55
+    - [UK100,  4H]   # Sharpe  9.23
+    - [GBPJPY, 4H]   # Sharpe  8.08
+    - [EURUSD, 4H]   # Sharpe  8.03
+    - [XAGUSD, 4H]   # Sharpe  6.07
+    - [USDJPY, 4H]   # Sharpe  6.08
+
+  # MANUAL WATCH ONLY — no systematic signals, context display only
+  manual_watch:
+    - [JP225,  all]  # ruin 14% on 1H — manual discretion only
+    - [HK50,   all]  # ruin 6.7% on 1H — system excluded
+
+# ── Excluded combos — walk-forward failed (Sharpe < 3.0 or ruin > 5%) ────────
+# These combos are NEVER eligible for live signal generation.
+# Pattern: all D timeframes have insufficient edge; several 15m/4H combos failed.
+excluded_combos:
+  # All Daily timeframes — too few samples, negative Sharpe on most
+  - [US30,   D]    # Sharpe  1.28  ruin 32.3%
+  - [GBPUSD, D]    # Sharpe  0.72  ruin  0.4%
+  - [DE40,   D]    # Sharpe -13.14 ruin 99.0%
+  - [UK100,  D]    # Sharpe -10.95 ruin 75.4%
+  - [USTEC,  D]    # Sharpe  1.81  ruin  0.5%
+  - [XAUUSD, D]    # Sharpe -2.04  ruin  0.0%
+  - [EURJPY, D]    # Sharpe  1.78  ruin  0.0%
+  - [EURUSD, D]    # Sharpe  2.95  ruin  0.0%
+  - [GBPJPY, D]    # Sharpe -11.15 ruin 71.7%
+  - [USDJPY, D]    # Sharpe  8.72  ruin  0.0%  — kept in bias only if needed
+  - [AUDUSD, D]    # Sharpe  0.02  ruin  0.0%
+  - [USDCAD, D]    # Sharpe  3.70  ruin  0.0%  — marginal, excluded for now
+  - [XAGUSD, D]    # Sharpe -8.29  ruin 62.8%
+  - [HK50,   D]    # Sharpe -0.71  ruin  0.2%
+  - [JP225,  D]    # manual watch only
+  # Manual watch instruments — all timeframes excluded from systematic signals
+  - [JP225,  all]  # ruin 14% on 1H — manual discretion only
+  - [HK50,   all]  # ruin 6.7% on 1H — system excluded
+  # 15m combos with negative Sharpe / high ruin
+  - [DE40,   15m]  # Sharpe -2.01  ruin 58.0%
+  - [EURJPY, 15m]  # Sharpe -14.78 ruin 98.0%
+  - [UK100,  15m]  # Sharpe -4.27  ruin 31.0%
+  - [USDJPY, 15m]  # Sharpe -3.32  ruin  1.7%
+  # 1H combos below Sharpe threshold
+  - [AUDUSD, 1H]   # Sharpe  1.46  ruin  0.2%
+  - [USDCAD, 1H]   # Sharpe  1.78  ruin  0.1%
+  # 4H combos with negative Sharpe
+  - [GBPUSD, 4H]   # Sharpe -2.69  ruin  0.0%
+  - [USDCAD, 4H]   # Sharpe -3.53  ruin  0.0%
+  - [DE40,   4H]   # Sharpe -10.68 ruin 54.7%
+  - [EURJPY, 4H]   # bias_only above — excluded from primary signals
+
+# ── Walk-forward state quality rules ─────────────────────────────────────────
+# Applied during conviction scoring and briefing generation.
+state_quality:
+  high_conviction_pattern:
+    # BULL_STRONG + BOS + OB + ABOVE liquidity = highest validated edge
+    # These state patterns get a +0.10 conviction score bonus
+    trend:     BULL
+    momentum:  STRONG
+    structure: BOS
+    rsi:       OB
+    liquidity: ABOVE
+  pullback_neutral_max_conviction: A
+  # PULLBACK_NEUTRAL states are systematically overfit — never promote to A+
+  # even if all gates pass. Require 4/4 pillars to reach A only.
+  pullback_neutral_conviction_cap: A
+  min_stability_for_primary: 0.40   # states below this never fire signals
+  min_oos_wr_for_primary:    0.50   # states with OOS WR < 50% never fire
+
 # ── MT5 connection ────────────────────────────────────────────────────────────
 mt5:
   login:       52810633

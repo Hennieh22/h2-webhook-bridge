@@ -57,6 +57,30 @@ ALL_INSTRUMENTS = [
     "EURJPY","GBPJPY","XAUUSD","XAGUSD",
 ]
 
+# ── Walk-forward validated signal roles ──────────────────────────────────────
+# Primary signal instruments at 1H — these receive full briefing treatment
+PRIMARY_SIGNAL_INSTRUMENTS = {
+    "US30", "GBPUSD", "UK100", "DE40", "USTEC",
+    "XAUUSD", "EURJPY", "EURUSD", "GBPJPY", "USDJPY", "XAGUSD",
+}
+# Instruments excluded from primary signals (too low Sharpe / high ruin)
+EXCLUDED_SIGNAL_INSTRUMENTS_1H = {"AUDUSD", "USDCAD"}
+
+# High-conviction state pattern from walk-forward results:
+# BULL_STRONG + BOS + OB + ABOVE liquidity = highest validated edge
+# These patterns receive a +0.10 bonus in conviction scoring.
+_HC = CFG.get("state_quality", {}).get("high_conviction_pattern", {})
+HC_TREND     = _HC.get("trend",     "BULL")
+HC_MOMENTUM  = _HC.get("momentum",  "STRONG")
+HC_STRUCTURE = _HC.get("structure", "BOS")
+HC_RSI       = _HC.get("rsi",       "OB")
+HC_LIQUIDITY = _HC.get("liquidity", "ABOVE")
+
+# PULLBACK_NEUTRAL states are systematically overfit — cap at "A" in briefing
+PULLBACK_NEUTRAL_MAX_CONV = CFG.get("state_quality", {}).get(
+    "pullback_neutral_conviction_cap", "A"
+)
+
 # ---------------------------------------------------------------------------
 # Session timing
 # ---------------------------------------------------------------------------
@@ -102,26 +126,100 @@ def minutes_to_next_kill_zone(now_utc: datetime) -> tuple[str, int]:
 # Scoring + tier
 # ---------------------------------------------------------------------------
 
-def conviction_score(prob: float, ev: float, stability: float, pillars: int) -> float:
+def conviction_score(
+    prob: float,
+    ev: float,
+    stability: float,
+    pillars: int,
+    state_id: str = "",
+) -> float:
     """
     conviction_score = prob×0.35 + ev×0.25 + stability×0.20 + (pillars/4)×0.20
-    ev is normalised to 0-1 range assuming max useful EV ~ 3.0R
+
+    Walk-forward bonus (+0.10) applied when state matches the highest-validated
+    pattern: BULL_STRONG + BOS + OB + ABOVE liquidity.
+    This pattern showed the most consistent OOS edge across all instruments.
+
+    ev is normalised to 0-1 range assuming max useful EV ~ 3.0R.
+    Score is clamped to [0.0, 1.0].
     """
     ev_norm = max(0.0, min(ev / 3.0, 1.0))
-    return (
+    base = (
         prob          * 0.35 +
         ev_norm       * 0.25 +
         stability     * 0.20 +
         (pillars / 4) * 0.20
     )
 
+    # High-conviction pattern bonus — walk-forward validated
+    bonus = 0.0
+    if state_id:
+        parts = state_id.split("_")
+        # State format: TREND_MOM_VOL_LIQ_SESS_STRUCT_RSI (7-8 parts)
+        if len(parts) >= 7:
+            trend  = parts[0]
+            mom    = parts[1]
+            liq    = parts[3]
+            struct = parts[5]
+            rsi    = parts[-1]
+            if (trend  == HC_TREND     and
+                mom    == HC_MOMENTUM  and
+                struct == HC_STRUCTURE and
+                rsi    == HC_RSI       and
+                liq    == HC_LIQUIDITY):
+                bonus = 0.10
 
-def assign_tier(score: float, gates_pass: bool, ruin_pct: float,
-                instrument: str, samples: int) -> str:
+    return min(1.0, base + bonus)
+
+
+def assign_tier(
+    score: float,
+    gates_pass: bool,
+    ruin_pct: float,
+    instrument: str,
+    samples: int,
+    state_id: str = "",
+    timeframe: str = "1H",
+) -> str:
+    """
+    Assign traffic-light tier to an instrument/state combination.
+
+    Walk-forward rules applied (2026-06-09):
+    - AVOID instruments (HK50, JP225) and D timeframes always → AVOID
+    - AUDUSD 1H and USDCAD 1H → AVOID (Sharpe below minimum)
+    - Ruin > 5% → RED regardless of score
+    - PULLBACK_NEUTRAL states → capped at AMBER (never GREEN)
+    - OVERFIT / REMOVE flagged states → RED
+    - Standard GREEN/AMBER/RED scoring for all others
+    """
+    # Permanent avoids
     if instrument in AVOID_INSTRUMENTS or samples < 30:
         return "AVOID"
+
+    # Daily timeframe — no edge, avoid list only
+    if timeframe == "D":
+        return "AVOID"
+
+    # 1H combos excluded by walk-forward
+    if timeframe == "1H" and instrument in EXCLUDED_SIGNAL_INSTRUMENTS_1H:
+        return "AVOID"
+
+    # Ruin gate — takes precedence over score
     if ruin_pct > 5.0:
         return "RED"
+
+    # PULLBACK_NEUTRAL — systematically overfit, cap at AMBER
+    if state_id:
+        parts = state_id.split("_")
+        if (len(parts) >= 7 and
+                parts[5] == "PULLBACK" and parts[6] == "NEUTRAL"):
+            if score > 0.65 and gates_pass:
+                return "AMBER"   # cap: would be GREEN but WF says overfit
+            if score >= 0.40:
+                return "AMBER"
+            return "RED"
+
+    # Standard tier rules
     if score > 0.65 and gates_pass:
         return "GREEN"
     if score >= 0.40:
@@ -275,10 +373,18 @@ def _load_latest_state(instrument: str, timeframe: str = PRIMARY_TF) -> Optional
             1 if wr > 0.50 else 0,
         ])
 
-        # Conviction
-        score = conviction_score(top_prob, ev, stab, pillars)
-        tier  = assign_tier(score, all_gates, ruin_pct, instrument, samples)
-        conv  = "A+" if pillars == 4 else "A" if pillars == 3 else "B" if pillars == 2 else "SKIP"
+        # Conviction — pass state_id for high-conviction pattern bonus
+        score = conviction_score(top_prob, ev, stab, pillars, state_id=state_id)
+        tier  = assign_tier(score, all_gates, ruin_pct, instrument, samples,
+                            state_id=state_id, timeframe=timeframe)
+        conv_raw = "A+" if pillars == 4 else "A" if pillars == 3 else "B" if pillars == 2 else "SKIP"
+        # Cap PULLBACK_NEUTRAL to max conviction from config
+        _parts = state_id.split("_")
+        _is_pbn = (len(_parts) >= 7 and
+                   _parts[5] == "PULLBACK" and _parts[6] == "NEUTRAL")
+        conv = (PULLBACK_NEUTRAL_MAX_CONV
+                if _is_pbn and conv_raw == "A+"
+                else conv_raw)
 
         dt_utc  = pd.to_datetime(row.get("datetime_utc", datetime.now(timezone.utc)), utc=True)
         dt_sast = dt_utc + SAST_OFFSET
