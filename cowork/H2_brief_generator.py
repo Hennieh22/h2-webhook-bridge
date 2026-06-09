@@ -1,66 +1,61 @@
 """
-H2 Brief Generator — Phase 9
-Reads live state, state stats, and signal log.
-Produces outputs/H2_daily_briefing.md.
+H2 Brief Generator — Phase 9 v2.0
+Produces outputs/H2_daily_briefing.md in the full 7-section format.
 
-Run directly:  py -3 cowork/H2_brief_generator.py
-Also called by briefing/generator.py session brief trigger.
+Run directly:  python cowork/H2_brief_generator.py
+Also callable: from cowork.H2_brief_generator import build_briefing
 """
 
-import json
 import csv
-import os
+import json
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
 ROOT       = Path(__file__).resolve().parent.parent
 OUTPUTS    = ROOT / "outputs"
 LIVE_STATE = OUTPUTS / "H2_live_state.json"
 SIGNAL_LOG = OUTPUTS / "H2_signal_log.csv"
 BRIEF_OUT  = OUTPUTS / "H2_daily_briefing.md"
-SAST       = timezone(timedelta(hours=2))
+SAST_TZ    = timezone(timedelta(hours=2))
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Static data ───────────────────────────────────────────────────────────────
 
-# Sharpe weights from backtest (used for ranking tie-breaks)
 SHARPE_WEIGHTS = {
     "US30":   {"1H": 15.08, "4H": 8.1,  "15m": 3.2},
-    "GBPUSD": {"1H": 7.85,  "4H": 4.2,  "15m": 2.1},
-    "XAUUSD": {"1H": 7.22,  "4H": 3.8,  "15m": 1.9},
-    "UK100":  {"1H": 9.14,  "4H": 5.1,  "15m": 2.4},
-    "DE40":   {"1H": 7.13,  "4H": 3.9,  "15m": 1.8},
-    "USTEC":  {"1H": 7.65,  "4H": 4.0,  "15m": 2.0},
-    "EURJPY": {"1H": 4.28,  "4H": 2.3,  "15m": 1.1},
-    "EURUSD": {"1H": 4.22,  "4H": 2.2,  "15m": 1.0},
-    "GBPJPY": {"1H": 3.11,  "4H": 1.7,  "15m": 0.8},
-    "USDJPY": {"1H": 3.83,  "4H": 2.0,  "15m": 1.0},
-    "AUDUSD": {"1H": 1.46,  "4H": 0.8,  "15m": 0.4},
-    "USDCAD": {"1H": 1.78,  "4H": 1.0,  "15m": 0.5},
-    "JP225":  {"1H": 2.00,  "4H": 1.0,  "15m": 0.5},
-    "HK50":   {"1H": 3.12,  "4H": 1.6,  "15m": 0.8},
-    "XAGUSD": {"1H": 2.50,  "4H": 1.3,  "15m": 0.6},
+    "GBPUSD": {"1H":  7.85, "4H": 4.2,  "15m": 2.1},
+    "XAUUSD": {"1H":  7.22, "4H": 3.8,  "15m": 1.9},
+    "UK100":  {"1H":  9.14, "4H": 5.1,  "15m": 2.4},
+    "DE40":   {"1H":  7.13, "4H": 3.9,  "15m": 1.8},
+    "USTEC":  {"1H":  7.65, "4H": 4.0,  "15m": 2.0},
+    "EURJPY": {"1H":  4.28, "4H": 2.3,  "15m": 1.1},
+    "EURUSD": {"1H":  4.22, "4H": 2.2,  "15m": 1.0},
+    "GBPJPY": {"1H":  3.11, "4H": 1.7,  "15m": 0.8},
+    "USDJPY": {"1H":  3.83, "4H": 2.0,  "15m": 1.0},
+    "AUDUSD": {"1H":  1.46, "4H": 0.8,  "15m": 0.4},
+    "USDCAD": {"1H":  1.78, "4H": 1.0,  "15m": 0.5},
+    "JP225":  {"1H":  2.00, "4H": 1.0,  "15m": 0.5},
+    "HK50":   {"1H":  3.12, "4H": 1.6,  "15m": 0.8},
+    "XAGUSD": {"1H":  2.50, "4H": 1.3,  "15m": 0.6},
 }
 
-# Instrument priority order (from BRIEF_PROMPT)
 PRIORITY_ORDER = [
     "US30", "GBPUSD", "DE40", "XAUUSD", "GBPJPY",
     "EURJPY", "EURUSD", "USDJPY", "USTEC", "UK100",
     "AUDUSD", "USDCAD", "XAGUSD",
 ]
 
-# Always avoid / manual only
-AVOID_INSTRUMENTS = {"JP225", "HK50", "AUS200"}
-MANUAL_WATCH      = {"JP225"}
+# Always excluded from signals — shown only in their dedicated sections
+AVOID_ALWAYS  = {"HK50", "AUS200"}
+MANUAL_WATCH  = {"JP225"}
+ALL_EXCLUDED  = AVOID_ALWAYS | MANUAL_WATCH
 
-# Session windows (UTC hours)
-SESSIONS = {
-    "Tokyo":   (0,  9),
-    "London":  (7,  16),
-    "NY":      (13, 22),
-    "Overlap": (13, 16),
+AVOID_REASONS_PERMANENT = {
+    "AUS200": "order rejection unresolved at broker",
+    "HK50":   "ruin 6.7%, drawdown -5.9R — system excluded",
+    "JP225":  "systematic signals excluded (manual watch only — ruin 14%)",
 }
 
 KILL_ZONES_UTC = [
@@ -69,41 +64,54 @@ KILL_ZONES_UTC = [
     {"name": "London Close", "hour": 16, "minute": 0},
 ]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+TIER_ICON = {"GREEN": "🟢", "AMBER": "🟡", "RED": "🔴", "AVOID": "⛔"}
+NEXT_SESSION_SAST = {
+    "Tokyo":   "09:00",   # London Open SAST
+    "London":  "15:00",   # NY Open SAST
+    "Overlap": "15:00",
+    "NY":      "09:00 (tomorrow)",
+    "Off-Hours": "09:00",
+}
+
+# ── Time helpers ──────────────────────────────────────────────────────────────
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+def to_sast(dt: datetime) -> datetime:
+    return dt.astimezone(SAST_TZ)
 
-def utc_to_sast(dt: datetime) -> datetime:
-    return dt.astimezone(SAST)
-
-
-def current_session(utc_hour: int) -> str:
-    if 13 <= utc_hour < 16:
-        return "London/NY Overlap"
-    if 13 <= utc_hour < 22:
-        return "NY"
-    if 7 <= utc_hour < 16:
-        return "London"
-    if 0 <= utc_hour < 9:
-        return "Tokyo"
+def current_session(h: int) -> str:
+    if 13 <= h < 16: return "London/NY Overlap"
+    if 16 <= h < 22: return "NY"
+    if  7 <= h < 16: return "London"
+    if  0 <= h <  9: return "Tokyo"
     return "Off-Hours"
 
+def kill_zone_status(now: datetime) -> str:
+    """Return 'OPEN NOW' if within 15 min of a kill zone, else 'X in Y min'."""
+    now_mins = now.hour * 60 + now.minute
+    best_name  = None
+    best_delta = None
 
-def next_kill_zone(now: datetime) -> dict:
-    """Return name and minutes until next kill zone."""
-    best = None
     for kz in KILL_ZONES_UTC:
-        candidate = now.replace(hour=kz["hour"], minute=kz["minute"],
-                                second=0, microsecond=0)
-        if candidate <= now:
-            candidate += timedelta(days=1)
-        diff = int((candidate - now).total_seconds() / 60)
-        if best is None or diff < best["minutes"]:
-            best = {"name": kz["name"], "minutes": diff}
-    return best
+        kz_mins = kz["hour"] * 60 + kz["minute"]
+        # distance forward
+        delta_fwd = (kz_mins - now_mins) % (24 * 60)
 
+        if delta_fwd <= 15:
+            return f"{kz['name']} OPEN NOW"
+
+        if best_delta is None or delta_fwd < best_delta:
+            best_delta = delta_fwd
+            best_name  = kz["name"]
+
+    hrs, mins = divmod(best_delta, 60)
+    if hrs:
+        return f"{best_name} in {hrs}h {mins}m"
+    return f"{best_name} in {mins} min"
+
+# ── Data loaders ──────────────────────────────────────────────────────────────
 
 def load_json(path: Path) -> dict:
     if not path.exists():
@@ -111,417 +119,376 @@ def load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
-
-def load_state_stats(instrument: str, timeframe: str) -> dict:
-    path = OUTPUTS / f"H2_state_stats_{instrument}_{timeframe}.json"
-    return load_json(path)
-
-
-def load_signal_log_today(today_date: str) -> list[dict]:
-    """Return today's rows from H2_signal_log.csv."""
+def load_signal_log_today(today: str) -> list:
     rows = []
     if not SIGNAL_LOG.exists():
         return rows
     with open(SIGNAL_LOG, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get("timestamp_utc", "").startswith(today_date):
+        for row in csv.DictReader(f):
+            if row.get("timestamp_utc", "").startswith(today):
                 rows.append(row)
     return rows
 
+# ── Scoring ───────────────────────────────────────────────────────────────────
 
-def tier_label(tier: str) -> str:
-    return {"GREEN": "🟢", "AMBER": "🟡", "RED": "🔴", "AVOID": "⛔"}.get(tier, "⚪")
+def conviction_score(data: dict) -> float:
+    prob      = data.get("next_states", [{}])[0].get("probability", 0.0) if data.get("next_states") else 0.0
+    ev        = max(0.0, data.get("historical_ev", 0.0))
+    stability = data.get("stability_score", 0.0)
+    pillars   = data.get("pillars_confirmed", 0) / 4.0
+    score = prob * 0.35 + (ev / 3.0) * 0.25 + stability * 0.20 + pillars * 0.20
+    return round(min(score, 1.0), 4)
 
+def assign_tier(data: dict, score: float) -> str:
+    gates_pass = data.get("all_gates_pass", False)
+    gates_n    = sum(1 for g in data.get("gates", {}).values()
+                     if isinstance(g, dict) and g.get("pass"))
+    samples    = data.get("sample_count", 0)
+    ruin       = data.get("ruin_pct", 0.0)
 
-def conviction_score_from_data(inst_data: dict) -> float:
-    """Recompute conviction score from live state fields."""
-    prob  = 0.0
-    if inst_data.get("next_states"):
-        prob = inst_data["next_states"][0].get("probability", 0.0)
-    ev        = max(0.0, inst_data.get("historical_ev", 0.0))
-    stability = inst_data.get("stability_score", 0.0)
-    pillars   = inst_data.get("pillars_confirmed", 0) / 4.0
-    score = (
-        prob      * 0.35 +
-        (ev / 3.0) * 0.25 +   # normalise EV (cap at 3R = full weight)
-        stability * 0.20 +
-        pillars   * 0.20
-    )
-    return min(score, 1.0)
+    if samples < 30:
+        return "AVOID"
+    if ruin > 5.0:
+        return "RED"
+    if score > 0.65 and gates_pass and samples >= 30:
+        return "GREEN"
+    if 0.40 <= score <= 0.65 or gates_n >= 4:
+        return "AMBER"
+    return "RED"
 
+def gates_count(data: dict) -> int:
+    return sum(1 for g in data.get("gates", {}).values()
+               if isinstance(g, dict) and g.get("pass"))
 
-def pillar_signals(state_id: str, inst_data: dict) -> dict:
-    """
-    Generate plain-English pillar confirmation signals
-    from the state ID and live data.
-    """
-    parts     = state_id.split("_") if state_id else []
+# ── Text generation ───────────────────────────────────────────────────────────
+
+def pillar_signals(state_id: str, data: dict) -> dict:
+    parts     = (state_id or "").split("_")
     trend     = parts[0] if len(parts) > 0 else "NEUTRAL"
     momentum  = parts[1] if len(parts) > 1 else "NEUTRAL"
-    vol       = parts[2] if len(parts) > 2 else "NORMAL"
-    liquidity = parts[3] if len(parts) > 3 else "INSIDE"
-    session   = parts[4] if len(parts) > 4 else "OFFHOURS"
     structure = parts[5] if len(parts) > 5 else "RANGE"
     rsi_zone  = parts[6] if len(parts) > 6 else "NEUTRAL"
-
     direction = "long" if trend == "BULL" else "short" if trend == "BEAR" else "flat"
 
-    # Volume pillar
+    # Volume
     if momentum == "STRONG":
-        vol_signal = f"RVOL ≥1.5×, delta positive — expansion confirming"
+        vol = "RVOL >=1.5x, delta positive — expansion confirming"
     elif structure in ("BOS", "MSS"):
-        vol_signal = f"Watch for RVOL spike ≥1.5× on breakout bar"
+        vol = "Watch for RVOL spike >=1.5x on breakout bar"
     elif structure == "CHOCH":
-        vol_signal = f"Delta flip required — sell→buy for {direction} CHoCH"
+        vol = f"Delta flip required — sell to buy for {direction} CHoCH"
     elif structure == "PULLBACK":
-        vol_signal = f"Volume dry-up on retrace, RVOL < 0.8× average"
+        vol = "Volume dry-up on retrace, RVOL < 0.8x average"
     else:
-        vol_signal = f"RVOL neutral — wait for expansion before entry"
+        vol = "RVOL neutral — wait for expansion before entry"
 
-    # Structure pillar
+    # Structure
     if structure == "BOS":
-        struct_signal = f"BOS printed — enter on retest of broken level"
+        struct = "BOS printed — enter on first retest of broken level"
     elif structure == "CHOCH":
-        struct_signal = f"CHoCH confirmed — wait for LTF BOS in {direction} direction"
+        struct = f"CHoCH confirmed — wait for LTF BOS in {direction} direction"
     elif structure == "MSS":
-        struct_signal = f"MSS printed — strongest structure signal, enter at retest"
+        struct = "MSS printed — strongest signal, enter at retest"
     elif structure == "PULLBACK":
-        struct_signal = f"HL holding, no CHoCH — structure intact for {direction}"
+        struct = f"HL holding, no CHoCH — structure intact for {direction}"
     elif structure == "LIQ_SWEEP":
-        struct_signal = f"Liquidity sweep — wait for reclaim within 3 bars"
+        struct = "Liquidity sweep — wait for reclaim within 3 bars"
     else:
-        struct_signal = f"Range / continuation — no BOS yet, wait for break"
+        struct = "Range / continuation — no BOS yet, wait for break"
 
-    # Fractals pillar
+    # Fractals
     if structure == "BOS":
-        frac_signal = f"Fractal HL must form and hold after pullback"
+        frac = "Fractal HL must form and hold after pullback"
     elif structure == "PULLBACK":
-        frac_signal = f"LTF fractal high at 50–62% retrace zone — key entry trigger"
+        frac = "LTF fractal high at 50-62% retrace zone — key entry trigger"
     elif structure == "LIQ_SWEEP":
-        frac_signal = f"Fractal swept — price must reclaim within 1–3 bars"
+        frac = "Fractal swept — price must reclaim within 1-3 bars"
     elif rsi_zone == "OB":
-        frac_signal = f"Equal highs forming — external liquidity target above"
+        frac = "Equal highs forming — external liquidity target above"
     elif rsi_zone == "OS":
-        frac_signal = f"Equal lows forming — external liquidity target below"
+        frac = "Equal lows forming — external liquidity target below"
     else:
-        frac_signal = f"Watch for fractal HL/LH formation at structure level"
+        frac = "Watch for fractal HL/LH formation at structure level"
 
-    # MTF pillar
-    next_states = inst_data.get("next_states", [])
-    top_next    = next_states[0].get("state", "") if next_states else ""
-    top_trend   = top_next.split("_")[0] if top_next else trend
-
+    # MTF
+    next_states = data.get("next_states", [])
     if trend == "BULL" and structure in ("BOS", "MSS"):
-        mtf_signal = f"4H BULL + 1H {structure} — require 5m BOS up before entry"
+        mtf = f"4H BULL + 1H {structure} — require 5m BOS up before entry"
     elif trend == "BULL" and structure == "PULLBACK":
-        mtf_signal = f"4H BULL + 1H PULLBACK — enter on 5m BOS up from HL"
+        mtf = "4H BULL + 1H PULLBACK — enter on 5m BOS up from HL"
     elif trend == "BEAR" and structure in ("BOS", "MSS"):
-        mtf_signal = f"4H BEAR + 1H {structure} — require 5m BOS down before entry"
+        mtf = f"4H BEAR + 1H {structure} — require 5m BOS down before entry"
     elif trend == "BEAR" and structure == "PULLBACK":
-        mtf_signal = f"4H BEAR + 1H PULLBACK — enter on 5m BOS down from LH"
+        mtf = "4H BEAR + 1H PULLBACK — enter on 5m BOS down from LH"
     elif structure == "CHOCH":
-        mtf_signal = f"4H {trend} + 1H CHoCH — wait for MSS on 5m to confirm reversal"
+        mtf = f"4H {trend} + 1H CHoCH — wait for MSS on 5m to confirm reversal"
     else:
-        mtf_signal = f"4H and 1H must agree on {direction} before entry"
+        mtf = f"4H and 1H must agree on {direction} before entry"
 
     # Invalidation
     if structure in ("BOS", "MSS", "PULLBACK") and trend == "BULL":
-        invalid = f"Price closes below the BOS level or HL breaks — exit plan invalid"
+        invalid = "Price closes below the BOS level or HL breaks"
     elif structure in ("BOS", "MSS", "PULLBACK") and trend == "BEAR":
-        invalid = f"Price closes above the BOS level or LH breaks — exit plan invalid"
+        invalid = "Price closes above the BOS level or LH breaks"
     else:
-        invalid = f"CHoCH prints on entry TF before position is established"
+        invalid = "CHoCH prints on entry TF before position is established"
 
-    return {
-        "volume":    vol_signal,
-        "structure": struct_signal,
-        "fractals":  frac_signal,
-        "mtf":       mtf_signal,
-        "invalid":   invalid,
-    }
+    return {"volume": vol, "structure": struct, "fractals": frac,
+            "mtf": mtf, "invalid": invalid}
 
 
-def situation_text(inst: str, state_id: str, inst_data: dict) -> str:
-    """Generate 2–3 sentence plain-English situation description."""
-    parts     = state_id.split("_") if state_id else []
+def situation_text(inst: str, state_id: str, data: dict) -> str:
+    parts     = (state_id or "").split("_")
     trend     = parts[0] if len(parts) > 0 else "NEUTRAL"
     momentum  = parts[1] if len(parts) > 1 else "NEUTRAL"
     vol       = parts[2] if len(parts) > 2 else "NORMAL"
     structure = parts[5] if len(parts) > 5 else "RANGE"
     rsi_zone  = parts[6] if len(parts) > 6 else "NEUTRAL"
-    session   = inst_data.get("session", "OFFHOURS")
+    session   = data.get("session", "OFFHOURS")
 
-    next_states = inst_data.get("next_states", [])
+    next_states = data.get("next_states", [])
     top_next    = next_states[0] if next_states else {}
     top_state   = top_next.get("state", "")
     top_prob    = top_next.get("probability", 0.0)
     top_ev      = top_next.get("ev", 0.0)
 
-    # Sentence 1 — current situation
-    direction = "bullish" if trend == "BULL" else "bearish" if trend == "BEAR" else "neutral"
-    mom_str   = "strong" if momentum == "STRONG" else "weak" if momentum == "WEAK" else "neutral"
-    vol_str   = "high-volatility" if vol == "HIGH" else "low-volatility" if vol == "LOW" else "normal"
-    struct_str = {
-        "BOS":       "break of structure confirmed",
-        "CHOCH":     "change of character printed",
-        "MSS":       "market structure shift — strongest reversal signal",
-        "PULLBACK":  "in a structured pullback",
+    # Sentence 1
+    dir_str  = "bullish" if trend == "BULL" else "bearish" if trend == "BEAR" else "neutral"
+    mom_str  = "strong" if momentum == "STRONG" else "weak" if momentum == "WEAK" else "neutral"
+    vol_str  = "high-volatility" if vol == "HIGH" else "low-volatility" if vol == "LOW" else "normal"
+    struct_map = {
+        "BOS": "break of structure confirmed",
+        "CHOCH": "change of character printed",
+        "MSS": "market structure shift",
+        "PULLBACK": "structured pullback in progress",
         "LIQ_SWEEP": "liquidity sweep in progress",
-        "TREND_CONT":"in trend continuation",
-        "RANGE":     "range-bound",
-    }.get(structure, structure)
+        "TREND_CONT": "trend continuation",
+        "RANGE": "range-bound",
+    }
+    struct_str = struct_map.get(structure, structure.lower())
+    s1 = (f"{inst} is {dir_str} with {mom_str} momentum — "
+          f"{struct_str} in {vol_str} conditions ({session} session).")
 
-    s1 = f"{inst} is {direction} with {mom_str} momentum — {struct_str} in {vol_str} conditions during the {session} session."
-
-    # Sentence 2 — next state forecast
+    # Sentence 2 — Markov forecast
     if top_state and top_prob > 0:
-        top_parts  = top_state.split("_")
-        top_trend  = top_parts[0] if top_parts else "?"
-        top_struct = top_parts[5] if len(top_parts) > 5 else "?"
-        ev_str     = f"+{top_ev:.1f}R" if top_ev >= 0 else f"{top_ev:.1f}R"
-        s2 = (f"Markov matrix forecasts {top_trend} {top_struct} as the most likely next state "
-              f"({top_prob*100:.0f}% probability, {ev_str} EV).")
+        tp = top_state.split("_")
+        t_trend  = tp[0] if tp else "?"
+        t_struct = tp[5] if len(tp) > 5 else "?"
+        ev_sign  = f"+{top_ev:.1f}R" if top_ev >= 0 else f"{top_ev:.1f}R"
+        s2 = (f"Markov matrix forecasts {t_trend} {t_struct} as the most likely "
+              f"next state ({top_prob*100:.0f}% probability, {ev_sign} EV).")
     else:
-        s2 = "Transition matrix has insufficient data — wait for next bar update."
+        s2 = "Transition matrix has insufficient data — wait for next cycle."
 
-    # Sentence 3 — action cue
+    # Sentence 3 — entry cue
     if rsi_zone == "OB" and trend == "BULL":
         s3 = "RSI overbought — wait for pullback to BOS level before entering long."
     elif rsi_zone == "OS" and trend == "BEAR":
-        s3 = "RSI oversold — wait for dead-cat bounce to exhaust before entering short."
+        s3 = "RSI oversold — wait for dead-cat bounce to exhaust before shorting."
     elif structure == "PULLBACK":
         s3 = "Do not enter until fractal HL prints and holds on the entry timeframe."
     elif structure in ("BOS", "MSS"):
         s3 = "Enter on first retest of the broken level with volume confirmation."
+    elif structure == "CHOCH":
+        s3 = "Wait for LTF BOS in the new direction before committing."
     else:
-        s3 = "Wait for structure event before committing — no entry in compression."
+        s3 = "Wait for a structure event — no entry in compression or range."
 
     return f"{s1} {s2} {s3}"
 
 
-def regime_summary(instruments: dict) -> dict:
-    """Classify overall session regime from live state."""
-    bull_count  = sum(1 for v in instruments.values()
-                      if v.get("current_state", "").startswith("BULL"))
-    bear_count  = sum(1 for v in instruments.values()
-                      if v.get("current_state", "").startswith("BEAR"))
-    green_count = sum(1 for v in instruments.values() if v.get("tier") == "GREEN")
-    amber_count = sum(1 for v in instruments.values() if v.get("tier") == "AMBER")
-    avoid_count = sum(1 for v in instruments.values() if v.get("tier") in ("AVOID", "RED"))
+def market_character(instruments: dict) -> str:
+    total      = max(len(instruments), 1)
+    bull_pct   = sum(1 for v in instruments.values()
+                     if v.get("current_state","").startswith("BULL")) / total
+    bear_pct   = sum(1 for v in instruments.values()
+                     if v.get("current_state","").startswith("BEAR")) / total
+    range_pct  = sum(1 for v in instruments.values()
+                     if "RANGE" in v.get("current_state","") or
+                        "COMPRESSION" in v.get("current_state","")) / total
+    green_n    = sum(1 for v in instruments.values() if v.get("_tier") == "GREEN")
 
-    comp_states = [k for k, v in instruments.items()
-                   if "RANGE" in v.get("current_state", "") or
-                      "COMPRESSION" in v.get("current_state", "")]
-
-    total = len(instruments)
-    if bull_count / max(total, 1) >= 0.55:
-        bias = "Bullish"
-    elif bear_count / max(total, 1) >= 0.55:
-        bias = "Bearish"
-    else:
-        bias = "Mixed"
-
-    if green_count >= 3:
-        character = "Trending"
-    elif avoid_count >= total * 0.5:
-        character = "Compressing"
-    else:
-        character = "Ranging"
-
-    return {
-        "bias":        bias,
-        "character":   character,
-        "green":       green_count,
-        "amber":       amber_count,
-        "avoid":       avoid_count,
-        "compression": comp_states,
-    }
+    if green_n >= 3 or bull_pct >= 0.55 or bear_pct >= 0.55:
+        return "Trending"
+    if range_pct >= 0.50:
+        return "Compressing"
+    return "Ranging"
 
 
-# ── Main briefing builder ──────────────────────────────────────────────────────
+# ── Main briefing builder ─────────────────────────────────────────────────────
 
 def build_briefing() -> str:
     now      = now_utc()
-    sast_now = utc_to_sast(now)
+    sast_now = to_sast(now)
     today    = now.strftime("%Y-%m-%d")
 
-    sast_str = sast_now.strftime("%d %b %Y · %H:%M SAST")
+    sast_str = sast_now.strftime("%d %b %Y %H:%M SAST")
     session  = current_session(now.hour)
-    kz       = next_kill_zone(now)
-    kz_str   = f"{kz['name']} in {kz['minutes']} min"
+    kz_str   = kill_zone_status(now)
 
-    # ── Load data ────────────────────────────────────────────────────────────
-    live = load_json(LIVE_STATE)
-    instruments: dict = live.get("instruments", {})
-    signal_rows = load_signal_log_today(today)
+    # ── Load ─────────────────────────────────────────────────────────────────
+    live        = load_json(LIVE_STATE)
+    instruments = live.get("instruments", {})
+    log_rows    = load_signal_log_today(today)
 
     if not instruments:
-        return f"# H2 SESSION BRIEF\n\n⚠ No live state data found. Run live/monitor.py first.\n"
+        return "# H2 SESSION BRIEF\n\n⚠ No live state data. Run `python live/monitor.py --once` first.\n"
 
-    # ── Score and classify all instruments ───────────────────────────────────
-    ranked = []
-    avoid_list  = []
-    manual_watch = []
+    # ── Score and classify ────────────────────────────────────────────────────
+    ranked       = []
+    avoid_rows   = []
+    manual_rows  = []
 
     for inst, data in instruments.items():
-        tf        = data.get("timeframe", "1H")
-        state_id  = data.get("current_state", "UNKNOWN")
-        tier      = data.get("tier", "RED")
-        conv      = data.get("conviction", "SKIP")
-        pillars   = data.get("pillars_confirmed", 0)
-        all_gates = data.get("all_gates_pass", False)
-        samples   = data.get("sample_count", 0)
-        ruin      = data.get("ruin_pct", 0.0)
-        score     = data.get("conviction_score", conviction_score_from_data(data))
-        sharpe    = SHARPE_WEIGHTS.get(inst, {}).get(tf, 1.0)
-        priority  = PRIORITY_ORDER.index(inst) if inst in PRIORITY_ORDER else 99
+        tf       = data.get("timeframe", "1H")
+        state_id = data.get("current_state", "UNKNOWN")
+        samples  = data.get("sample_count", 0)
+        ruin     = data.get("ruin_pct", 0.0)
+        score    = data.get("conviction_score") or conviction_score(data)
+        tier     = assign_tier(data, score)
+        data["_tier"] = tier          # stash for character calc
 
+        priority = PRIORITY_ORDER.index(inst) if inst in PRIORITY_ORDER else 99
+        sharpe   = SHARPE_WEIGHTS.get(inst, {}).get(tf, 1.0)
         next_states = data.get("next_states", [])
         top_next    = next_states[0] if next_states else {}
 
         row = {
-            "inst":       inst,
-            "tf":         tf,
-            "state_id":   state_id,
-            "tier":       tier,
-            "conv":       conv,
-            "pillars":    pillars,
-            "all_gates":  all_gates,
-            "samples":    samples,
-            "ruin":       ruin,
-            "score":      score,
-            "sharpe":     sharpe,
-            "priority":   priority,
-            "wr":         data.get("historical_wr", 0.0),
-            "ev":         data.get("historical_ev", 0.0),
-            "gates_n":    sum(1 for g in data.get("gates", {}).values()
-                              if isinstance(g, dict) and g.get("pass")),
-            "top_next":   top_next,
-            "data":       data,
+            "inst":     inst,
+            "tf":       tf,
+            "state_id": state_id,
+            "tier":     tier,
+            "conv":     data.get("conviction", "SKIP"),
+            "pillars":  data.get("pillars_confirmed", 0),
+            "all_gates":data.get("all_gates_pass", False),
+            "gates_n":  gates_count(data),
+            "samples":  samples,
+            "ruin":     ruin,
+            "score":    score,
+            "sharpe":   sharpe,
+            "priority": priority,
+            "wr":       data.get("historical_wr", 0.0),
+            "ev":       data.get("historical_ev", 0.0),
+            "top_next": top_next,
+            "data":     data,
         }
 
         if inst in MANUAL_WATCH:
-            manual_watch.append(row)
-        elif inst in AVOID_INSTRUMENTS or tier == "AVOID" or ruin > 5.0:
-            avoid_list.append(row)
+            manual_rows.append(row)
+        elif inst in AVOID_ALWAYS or tier == "AVOID" or ruin > 5.0:
+            avoid_rows.append(row)
         else:
             ranked.append(row)
 
-    # Sort: tier order then score × sharpe
     tier_order = {"GREEN": 0, "AMBER": 1, "RED": 2, "AVOID": 3}
     ranked.sort(key=lambda r: (
         tier_order.get(r["tier"], 4),
-        -r["score"] * r["sharpe"],
+        -(r["score"] * r["sharpe"]),
         r["priority"],
     ))
 
     green_setups = [r for r in ranked if r["tier"] == "GREEN"]
     amber_setups = [r for r in ranked if r["tier"] == "AMBER"]
-    top5         = (green_setups + amber_setups)[:5]
-    if not top5:
-        top5 = ranked[:5]
+    top5         = (green_setups + amber_setups)[:5] or ranked[:5]
 
-    regime = regime_summary(instruments)
+    character  = market_character(instruments)
+    green_n    = len(green_setups)
 
-    # ── Signal log analysis ───────────────────────────────────────────────────
-    fired_today  = [r for r in signal_rows if r.get("fired") == "True"]
-    failed_today = [r for r in signal_rows
-                    if r.get("outcome_r") and float(r["outcome_r"] or 0) < 0]
+    # ── Signal log stats ──────────────────────────────────────────────────────
+    fired_today  = [r for r in log_rows if str(r.get("fired","")).lower() == "true"]
+    failed_today = [r for r in log_rows
+                    if r.get("outcome_r") and
+                    str(r["outcome_r"]).replace("-","").replace(".","").isdigit() and
+                    float(r["outcome_r"]) < 0]
 
-    # ── Avoid list assembly ───────────────────────────────────────────────────
-    avoid_reasons = {}
-    for r in avoid_list:
-        reasons = []
-        if r["inst"] in AVOID_INSTRUMENTS:
-            if r["inst"] == "HK50":
-                reasons.append("ruin 6.7% — system excluded")
-            else:
-                reasons.append("system excluded — manual watch only")
-        if r["ruin"] > 5.0 and r["inst"] not in AVOID_INSTRUMENTS:
-            reasons.append(f"ruin {r['ruin']:.1f}% > 5% threshold")
+    compression_list = [
+        inst for inst, data in instruments.items()
+        if "RANGE" in data.get("current_state","") or
+           "COMPRESSION" in data.get("current_state","")
+    ]
+
+    # ── Avoid reasons ─────────────────────────────────────────────────────────
+    avoid_reasons: dict = dict(AVOID_REASONS_PERMANENT)  # always include all 3
+    for r in avoid_rows:
+        if r["inst"] in avoid_reasons:
+            continue
+        parts = []
+        if r["ruin"] > 5.0:
+            parts.append(f"ruin {r['ruin']:.1f}% > 5% threshold")
         if r["samples"] < 30:
-            reasons.append(f"only {r['samples']} samples — below 30 minimum")
-        if r["tier"] == "AVOID":
-            reasons.append("conviction score below threshold")
-        avoid_reasons[r["inst"]] = ", ".join(reasons) if reasons else "system rule"
+            parts.append(f"only {r['samples']} samples — below 30 minimum")
+        if "RANGE" in r["state_id"] or "COMPRESSION" in r["state_id"]:
+            parts.append("compression / range — no directional edge")
+        if not parts:
+            parts.append("conviction score below threshold")
+        avoid_reasons[r["inst"]] = ", ".join(parts)
 
-    compression_list = regime["compression"]
-    for c in compression_list:
-        if c not in avoid_reasons:
-            avoid_reasons[c] = "compression / range — no directional edge"
+    for inst in compression_list:
+        if inst not in avoid_reasons and inst not in ALL_EXCLUDED:
+            avoid_reasons[inst] = "compression / range — no directional edge"
 
-    # ── Build markdown ────────────────────────────────────────────────────────
-    lines = []
+    # ══════════════════════════════════════════════════════════════════════════
+    # BUILD MARKDOWN
+    # ══════════════════════════════════════════════════════════════════════════
+    L = []
 
-    # Header
-    lines += [
+    # ── SECTION 1 — SESSION HEADER ────────────────────────────────────────────
+    L += [
         "# H2 SESSION BRIEF",
-        f"**{sast_str} | Session: {session}**",
+        f"**Generated: {sast_str}**",
+        f"**Session: {session}**",
         f"**Kill zone: {kz_str}**",
+        f"**Market character: {character}**",
+        f"**GREEN setups available: {green_n}**",
         "",
         "---",
         "",
     ]
 
-    # Market regime
-    lines += [
-        "## MARKET REGIME",
-        "| Metric | Value |",
-        "|---|---|",
-        f"| Session character | {regime['character']} |",
-        f"| Overall bias | {regime['bias']} |",
-        f"| GREEN setups | {regime['green']} |",
-        f"| AMBER setups | {regime['amber']} |",
-        f"| AVOID count | {regime['avoid']} |",
-        "",
-        "---",
-        "",
-    ]
-
-    # Top 5 setups
-    if green_setups:
-        lines.append("## TOP 5 RIGHT NOW 🟢")
-    else:
-        lines += [
-            "## TOP 5 RIGHT NOW 🟡",
+    # ── SECTION 2 — TOP 5 RIGHT NOW ───────────────────────────────────────────
+    if green_n == 0:
+        next_sess_sast = NEXT_SESSION_SAST.get(session, "next session open")
+        L += [
+            "## SECTION 2 — TOP 5 RIGHT NOW",
+            "",
             "> **No A+ setups active — patience required.**",
-            "> Check again at next session open.",
+            f"> Next opportunity: {next_sess_sast} SAST",
             "",
         ]
-    lines.append("")
+    else:
+        L += ["## SECTION 2 — TOP 5 RIGHT NOW", ""]
 
     for rank, row in enumerate(top5, 1):
-        inst      = row["inst"]
-        tf        = row["tf"]
-        state_id  = row["state_id"]
-        data      = row["data"]
-        top_next  = row["top_next"]
-        pillars   = data.get("confirmation_pillars", {})
-        sigs      = pillar_signals(state_id, data)
-        situation = situation_text(inst, state_id, data)
+        inst     = row["inst"]
+        tf       = row["tf"]
+        sid      = row["state_id"]
+        data     = row["data"]
+        top_next = row["top_next"]
+        sigs     = pillar_signals(sid, data)
+        sit      = situation_text(inst, sid, data)
 
-        next_state_str = (
-            f"`{top_next.get('state','—')}` at "
-            f"{top_next.get('probability', 0)*100:.0f}%"
-            if top_next else "— insufficient data"
-        )
-        ev_str  = f"{row['ev']:+.2f}R"
-        wr_str  = f"{row['wr']*100:.1f}%" if row["wr"] > 0 else "—"
-        gates_n = row["gates_n"]
+        sess_label  = data.get("session", "—")
+        low_samples = row["samples"] < 30
 
-        lines += [
-            f"### {rank}. {inst} · {tf} · {row['conv']} · {data.get('session','—')}",
-            f"**State:** `{state_id}`",
-            f"**Situation:** {situation}",
+        next_str = (f"`{top_next.get('state','—')}` — "
+                    f"{top_next.get('probability',0)*100:.0f}% probability"
+                    if top_next else "— insufficient data")
+
+        wr_str   = f"{row['wr']*100:.1f}%" if row["wr"] > 0 else "—"
+        ev_sign  = f"+{row['ev']:.2f}R" if row["ev"] >= 0 else f"{row['ev']:.2f}R"
+        stats_line = (f"WR {wr_str} · EV {ev_sign} · {row['samples']} samples · "
+                      f"Gates {row['gates_n']}/5 · Pillars {row['pillars']}/4")
+
+        if low_samples:
+            L.append(f"> ⚠ **Low sample count ({row['samples']} trades) — "
+                     f"statistics unreliable. Treat as AMBER maximum.**")
+            L.append("")
+
+        L += [
+            f"### {rank}. {inst} · {tf} · {row['conv']} · {sess_label}",
+            f"**State:** `{sid}`",
             "",
-            "| Metric | Value |",
-            "|---|---|",
-            f"| Top next state | {next_state_str} |",
-            f"| Expected move | {ev_str} |",
-            f"| Historical WR | {wr_str} over {row['samples']} trades |",
-            f"| Gates passing | {gates_n}/5 |",
-            f"| Pillars confirmed | {row['pillars']}/4 |",
+            f"**Situation:** {sit}",
             "",
             "**Look for before entering:**",
             f"- Volume: {sigs['volume']}",
@@ -531,152 +498,171 @@ def build_briefing() -> str:
             "",
             f"**Do NOT enter if:** {sigs['invalid']}",
             "",
+            f"**Stats:** {stats_line}",
+            "",
             "---",
             "",
         ]
 
-    # Full instrument table
-    lines += [
-        "## FULL INSTRUMENT TABLE",
+    # ── SECTION 3 — FULL INSTRUMENT TABLE ────────────────────────────────────
+    L += [
+        "## SECTION 3 — FULL INSTRUMENT TABLE",
         "",
-        "| # | 🚦 | Instrument | TF | State | Next State | P% | EV | WR | Pillars | Score |",
+        "| # | Tier | Instrument | TF | Current State | Next State | P% | EV | WR | Pillars | Score |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-
     for i, row in enumerate(ranked, 1):
-        top_next = row["top_next"]
-        next_str = top_next.get("state", "—")[:30] if top_next else "—"
-        prob_str = f"{top_next.get('probability',0)*100:.0f}%" if top_next else "—"
-        ev_str   = f"{row['ev']:+.2f}R"
-        wr_str   = f"{row['wr']*100:.0f}%" if row["wr"] > 0 else "—"
-        score_str = f"{row['score']:.2f}"
-        lines.append(
-            f"| {i} | {tier_label(row['tier'])} | {row['inst']} | {row['tf']} "
-            f"| {row['state_id'][:28]} | {next_str} | {prob_str} "
-            f"| {ev_str} | {wr_str} | {row['pillars']}/4 | {score_str} |"
+        tn    = row["top_next"]
+        nxt   = tn.get("state", "—")[:30] if tn else "—"
+        pct   = f"{tn.get('probability',0)*100:.0f}%" if tn else "—"
+        ev_s  = f"+{row['ev']:.2f}R" if row["ev"] >= 0 else f"{row['ev']:.2f}R"
+        wr_s  = f"{row['wr']*100:.0f}%" if row["wr"] > 0 else "—"
+        icon  = TIER_ICON.get(row["tier"], "⚪")
+        L.append(
+            f"| {i} | {icon} | {row['inst']} | {row['tf']} "
+            f"| {row['state_id'][:28]} | {nxt} "
+            f"| {pct} | {ev_s} | {wr_s} | {row['pillars']}/4 | {row['score']:.2f} |"
         )
+    L += ["", "---", ""]
 
-    lines += ["", "---", ""]
+    # ── SECTION 4 — AVOID LIST ────────────────────────────────────────────────
+    L += ["## SECTION 4 — AVOID LIST", "", "| Instrument | Reason |", "|---|---|"]
+    for inst in sorted(avoid_reasons):
+        L.append(f"| ⛔ {inst} | {avoid_reasons[inst]} |")
+    L += ["", "---", ""]
 
-    # JP225 manual watch section
-    if manual_watch:
-        lines += ["## MANUAL WATCH 👁", ""]
-        for row in manual_watch:
-            data     = row["data"]
-            state_id = row["state_id"]
-            lines += [
-                f"**{row['inst']} · {row['tf']}** — `{state_id}`",
-                f"{data.get('state_description', '')}",
-                "",
-                "> Revisit after data expansion — manual discretion only.",
-                "",
-            ]
-        lines += ["---", ""]
-
-    # Avoid list
-    lines += ["## AVOID LIST ⛔", "", "| Instrument | Reason |", "|---|---|"]
-    for inst, reason in sorted(avoid_reasons.items()):
-        lines.append(f"| {inst} | {reason} |")
-    lines += ["", "---", ""]
-
-    # Risk flags
-    comp_str = ", ".join(compression_list) if compression_list else "None"
-    lines += [
-        "## RISK FLAGS ⚠️",
-        f"News next 2 hours: None (check ForexFactory manually before entry)",
-        f"Signals fired today: {len(fired_today)}",
-        f"Failed today: {len(failed_today)}",
-        f"In compression: {comp_str}",
+    # ── SECTION 5 — RISK FLAGS ────────────────────────────────────────────────
+    comp_str = ", ".join(sorted(set(compression_list))) if compression_list else "None"
+    L += [
+        "## SECTION 5 — RISK FLAGS",
+        "",
+        "| Flag | Value |",
+        "|---|---|",
+        "| News next 2 hours | None identified — check ForexFactory manually before entry |",
+        f"| Signals fired today | {len(fired_today)} |",
+        f"| Failed today | {len(failed_today)} |",
+        f"| In compression | {comp_str} |",
+        "| Session note | — |",
         "",
         "---",
         "",
     ]
 
-    # Signals fired today
-    lines += [
+    # ── SECTION 6 — JP225 MANUAL WATCH ───────────────────────────────────────
+    L += ["## SECTION 6 — JP225 MANUAL WATCH", ""]
+
+    jp_data = None
+    for row in manual_rows:
+        if row["inst"] == "JP225":
+            jp_data = row
+            break
+
+    if jp_data:
+        d        = jp_data["data"]
+        sid      = jp_data["state_id"]
+        tn       = jp_data["top_next"]
+        nxt_str  = (f"`{tn.get('state','—')}` — "
+                    f"{tn.get('probability',0)*100:.0f}% probability · "
+                    f"EV {tn.get('ev',0.0):+.2f}R"
+                    if tn else "— insufficient data")
+        L += [
+            f"**State:** `{sid}`",
+            f"**Next state forecast:** {nxt_str}",
+            "",
+            "> Manual discretion only. Systematic signals excluded — ruin 14%.",
+            "> Revisit after data expansion (target: 200+ samples per state).",
+            "",
+        ]
+    else:
+        L += [
+            "JP225 data not in current live state.",
+            "",
+            "> Manual discretion only. Systematic signals excluded — ruin 14%.",
+            "> Revisit after data expansion (target: 200+ samples per state).",
+            "",
+        ]
+    L += ["---", ""]
+
+    # ── SIGNALS FIRED TABLE (bonus — not in spec but useful) ─────────────────
+    L += [
         "## SIGNALS FIRED TODAY",
         "",
         "| SAST | Instrument | Dir | Conv | EV | Outcome |",
         "|---|---|---|---|---|---|",
     ]
     if fired_today:
-        for row in fired_today:
-            sast_t   = row.get("sast_time", "")[:16]
-            outcome  = row.get("outcome_r", "—") or "—"
-            ev_val   = row.get("ev", "—")
-            lines.append(
-                f"| {sast_t} | {row.get('instrument','')} | "
-                f"{row.get('direction','')} | {row.get('conviction','')} | "
-                f"{ev_val} | {outcome} |"
+        for r in fired_today:
+            sast_t  = r.get("sast_time","")[:16]
+            outcome = r.get("outcome_r","—") or "—"
+            L.append(
+                f"| {sast_t} | {r.get('instrument','')} | "
+                f"{r.get('direction','')} | {r.get('conviction','')} | "
+                f"{r.get('ev','—')} | {outcome} |"
             )
     else:
-        lines.append("| — | No signals fired today | — | — | — | — |")
+        L.append("| — | No signals fired today | — | — | — | — |")
+    L += ["", "---", ""]
 
-    lines += ["", "---", ""]
+    # ── SECTION 7 — YOUR NEXT ACTION ─────────────────────────────────────────
+    L += ["## SECTION 7 — YOUR NEXT ACTION", ""]
 
-    # YOUR NEXT ACTION
     best = top5[0] if top5 else None
     if best:
         inst     = best["inst"]
         tf       = best["tf"]
-        state_id = best["state_id"]
-        sigs     = pillar_signals(state_id, best["data"])
-        top_next = best["top_next"]
-        next_str = top_next.get("state", "") if top_next else ""
-        next_parts  = next_str.split("_")
-        next_struct = next_parts[5] if len(next_parts) > 5 else "BOS"
-        direction   = "long" if state_id.startswith("BULL") else "short"
+        sid      = best["state_id"]
+        sigs     = pillar_signals(sid, best["data"])
+        tn       = best["top_next"]
+        tn_parts = (tn.get("state","") or "").split("_")
+        tn_struct = tn_parts[5] if len(tn_parts) > 5 else "BOS"
+        direction = "long" if sid.startswith("BULL") else "short"
+        gate_note = "all 5 gates passing" if best["all_gates"] else f"{best['gates_n']}/5 gates passing"
 
         action = (
-            f"Focus on **{inst} {tf}**. "
-            f"The Markov matrix forecasts {next_struct} as the next state — "
-            f"wait for {sigs['structure'].lower()} and {sigs['volume'].lower()} "
-            f"before entering {direction}. "
-            f"Do not enter until {sigs['invalid'].lower()}."
+            f"Open **{inst}** on the **{tf}** chart. "
+            f"The system is in a `{sid}` state with {tn_struct} forecast "
+            f"as the next state ({gate_note}). "
+            f"Wait for {sigs['structure'].lower()} and {sigs['volume'].lower()} "
+            f"before entering {direction} — "
+            f"do not enter until {sigs['invalid'].lower()}."
         )
     else:
+        next_sess = NEXT_SESSION_SAST.get(session, "next session")
         action = (
-            "No qualified setups active at this time. "
-            "Monitor the next session open for state transitions. "
-            "Patience is a position."
+            f"No qualified setups active at this time. "
+            f"Monitor for state transitions at {next_sess} SAST. "
+            f"Patience is a position."
         )
 
-    lines += [
-        "## YOUR NEXT ACTION",
-        "",
-        action,
-        "",
-        "---",
-        f"*H2 Quant System v1 · Generated {sast_now.strftime('%Y-%m-%d %H:%M SAST')}*",
-    ]
+    L += [action, "", "---"]
+    L.append(f"*H2 Quant System v1 · Generated {sast_str}*")
 
-    return "\n".join(lines)
+    return "\n".join(L)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # Force UTF-8 on Windows consoles that default to cp1252
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    print("=" * 60)
-    print("H2 BRIEF GENERATOR")
-    print(f"Running at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    print("=" * 60)
+    print("=" * 70)
+    print("  H2 BRIEF GENERATOR v2.0")
+    print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    print("=" * 70)
 
-    briefing = build_briefing()
+    brief = build_briefing()
 
-    # Save
     BRIEF_OUT.parent.mkdir(parents=True, exist_ok=True)
     with open(BRIEF_OUT, "w", encoding="utf-8") as f:
-        f.write(briefing)
+        f.write(brief)
 
-    print(briefing)
+    print(brief)
     print()
-    print("=" * 60)
-    print(f"Saved -> {BRIEF_OUT}")
-    print("=" * 60)
+    print("=" * 70)
+    print(f"  Saved -> {BRIEF_OUT}")
+    print(f"  Prompt -> {ROOT / 'cowork' / 'H2_BRIEF_PROMPT.md'}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
