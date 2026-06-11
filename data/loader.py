@@ -115,6 +115,117 @@ def fetch_mt5(instrument: str, timeframe: str, n_bars: Optional[int] = None) -> 
     return df
 
 
+def fetch_mt5_max_history(instrument: str, timeframe: str,
+                           start_year: int = 2018) -> Optional[pd.DataFrame]:
+    """
+    Pull maximum available MT5 history using copy_rates_range.
+    Goes back to start_year (default 2018) so we get 5-8+ years of data.
+    Uses date-range query instead of bar-count query to bypass the
+    default_bars=5000 ceiling.
+    """
+    import MetaTrader5 as mt5
+    from datetime import timezone as tz
+
+    symbol_map = CFG["mt5"]["symbol_map"]
+    symbol = symbol_map.get(instrument, instrument)
+    tf     = _mt5_tf_constant(timeframe)
+
+    if not mt5.initialize():
+        log.warning("MT5 initialize() failed")
+        return None
+
+    date_from = datetime(start_year, 1, 1, tzinfo=tz.utc)
+    date_to   = datetime.now(tz=tz.utc)
+
+    rates = mt5.copy_rates_range(symbol, tf, date_from, date_to)
+    mt5.shutdown()
+
+    if rates is None or len(rates) == 0:
+        log.warning(f"MT5 max-history returned no data for {symbol} {timeframe}")
+        return None
+
+    df = pd.DataFrame(rates)
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.rename(columns={
+        "time":        "datetime_utc",
+        "open":        "open",
+        "high":        "high",
+        "low":         "low",
+        "close":       "close",
+        "tick_volume": "volume",
+    })
+    df = df[["datetime_utc", "open", "high", "low", "close", "volume"]].copy()
+    df = df.sort_values("datetime_utc").reset_index(drop=True)
+    df["source"] = "mt5_maxhist"
+
+    log.info(f"MT5 max-history: {instrument} {timeframe} - {len(df)} bars "
+             f"({str(df['datetime_utc'].iloc[0])[:10]} to "
+             f"{str(df['datetime_utc'].iloc[-1])[:10]})")
+    return df
+
+
+# Instruments to include in the max-history pull
+_MAX_HIST_INSTRUMENTS = [
+    "JP225", "DE40", "UK100", "US30", "USTEC", "HK50",
+    "EURUSD", "GBPUSD", "USDJPY", "USDCAD",
+    "EURJPY", "GBPJPY",
+    "XAUUSD", "XAGUSD",
+]
+_MAX_HIST_TIMEFRAMES = ["1H", "4H", "D"]
+
+
+def run_max_history_batch(start_year: int = 2018,
+                           timeframes: Optional[list] = None,
+                           instruments: Optional[list] = None) -> dict:
+    """
+    Pull maximum MT5 history for all backtest instruments.
+    Falls back to yfinance (730d cap) if MT5 returns nothing.
+    Saves each result to data/processed/ parquet.
+    """
+    insts = instruments or _MAX_HIST_INSTRUMENTS
+    tfs   = timeframes   or _MAX_HIST_TIMEFRAMES
+    total = len(insts) * len(tfs)
+    done  = 0
+    results = {}
+
+    print(f"\n  Pulling max history (from {start_year}) for "
+          f"{len(insts)} instruments × {len(tfs)} timeframes = {total} files\n")
+
+    for inst in insts:
+        for tf in tfs:
+            key = f"{inst}_{tf}"
+            try:
+                df = fetch_mt5_max_history(inst, tf, start_year=start_year)
+
+                if df is None or df.empty:
+                    log.info(f"MT5 max-history failed for {key} — falling back to yfinance")
+                    df = fetch_yfinance(inst, tf)  # 730d cap on 1H
+
+                if df is not None and not df.empty:
+                    df = _add_sast(df)
+                    if _validate(df, inst, tf):
+                        save_parquet(df, inst, tf)
+                        n    = len(df)
+                        frm  = str(df["datetime_utc"].iloc[0])[:10]
+                        to   = str(df["datetime_utc"].iloc[-1])[:10]
+                        results[key] = f"ok  {n:>6} bars  {frm} to {to}"
+                        done += 1
+                        print(f"  [{done:>3}/{total}] {key:<18}  {results[key]}")
+                        continue
+
+                results[key] = "FAIL — no data"
+                print(f"  [{done:>3}/{total}] {key:<18}  {results[key]}")
+
+            except Exception as e:
+                results[key] = f"ERROR: {e}"
+                log.error(f"max-history error {key}: {e}")
+                print(f"  [ERR] {key:<18}  {e}")
+
+    ok = sum(1 for v in results.values() if v.startswith("ok"))
+    print(f"\n  Done: {ok}/{total} files updated.\n")
+    return results
+
+
 # ---------------------------------------------------------------------------
 # yfinance source
 # ---------------------------------------------------------------------------
@@ -456,9 +567,23 @@ if __name__ == "__main__":
     parser.add_argument("--source", choices=["mt5", "yfinance", "stooq", "csv"], help="Force data source")
     parser.add_argument("--batch", action="store_true", help="Fetch all primary instruments")
     parser.add_argument("--bars", type=int, help="Number of bars (MT5 only)")
+    parser.add_argument("--max-history", action="store_true",
+                        help="Pull maximum available MT5 history (from 2018) for all backtest instruments")
+    parser.add_argument("--start-year", type=int, default=2018,
+                        help="Start year for --max-history (default: 2018)")
     args = parser.parse_args()
 
-    if args.batch:
+    if args.max_history:
+        insts = [args.instrument] if args.instrument else None
+        tfs   = [args.timeframe]  if args.timeframe  else None
+        results = run_max_history_batch(
+            start_year  = args.start_year,
+            timeframes  = tfs,
+            instruments = insts,
+        )
+        ok = sum(1 for v in results.values() if v.startswith("ok"))
+        print(f"Max-history pull complete: {ok}/{len(results)} files updated.")
+    elif args.batch:
         results = run_batch()
         ok = sum(1 for v in results.values() if v == "ok")
         print(f"\nBatch result: {ok}/{len(results)} successful")

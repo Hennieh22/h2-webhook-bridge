@@ -326,3 +326,54 @@ logging:
   level:      INFO
   directory:  "logs/"
   signal_log: "outputs/H2_signal_log.csv"
+
+# ── Golden Highway — structural entry gate system ─────────────────────────────
+# Independent from H2 Markov. No Markov engine required.
+# Validated: JP225 1H  |  Version C live config  |  Validated June 2026
+golden_highway:
+  enabled:  true
+  dry_run:  true
+
+  jp225:
+    enabled:           true
+    timeframe:         "1H"
+    tier:              2
+    validated:         true
+    validation_date:   "2026-06"
+    validation_trades: 21
+    validation_wr:     52.4
+    validation_sharpe: 4.62
+    validation_ev:     0.292
+
+    sessions:
+      LONDON:  valid
+      OVERLAP: valid
+      TOKYO:   valid
+      NY:      blocked      # 38.9% WR, -0.02R EV — degrades system performance
+
+    session_conviction:
+      LONDON:  HIGH         # 100% WR in OOS analysis (2+3 trades)
+      OVERLAP: HIGH         # grouped with London — same 100% WR finding
+      TOKYO:   MEDIUM       # 37.5% WR — acceptable, lower conviction
+      NY:      BLOCKED      # EV negative — excluded from Version C config
+
+    gates:
+      entry_score_min:    40   # loose gates — validated on 8.4yr OOS
+      pullback_score_min:  7
+      min_rr:            2.0
+
+    trade_params:
+      primary_target_pts: 250
+      sl_atr_mult:        2.0
+      tp_type_a:          2.0
+      tp_type_b:          1.5
+      max_hold_bars:      20
+
+    position_sizing:
+      trade_1: 0.5
+      trade_2: 1.0
+      trade_3: 1.5
+
+    prop_mode:       false
+    bot_execution:   false
+    whatsapp_alerts: true

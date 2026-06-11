@@ -1,0 +1,595 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Golden Highway v3 — Structure Engine  (Pine Script v5)
+// Validated instrument: JP225 1H  |  OOS: 60% WR, Sharpe 5.52, 8.4yr backtest
+// Loose gates (default): score>=40, pb>=7  |  Strict: score>=50, pb>=9
+//
+// Architecture: 6-layer structural entry gate
+//   L1 Macro state (PULLBACK / LIQ_SWEEP / REACCUMULATION)
+//   L2 Location within state (LATE_PULLBACK / SWEEP_AT_LOW/HIGH / etc.)
+//   L3 Liquidity R:R (internal + external levels, min 2:1)
+//   L4 Markov (0 — not yet wired; placeholder)
+//   L5 Pullback completion score (0-15, 7-check system)
+//
+// Key finding from 15-trade OOS analysis:
+//   London/Overlap = 100% WR  |  Tokyo = 57%  |  NY = 40%  → flag NY
+//   LIQ_SWEEP = 80% of setups  |  winners and losers share same PB score
+//   All signals are Trade #1 in their BOS cycle (anti-spam working)
+//
+// Volume-unavailable instruments (UK100, DE40): ATR-based proxies replace
+// volume in C4 dry-up check.
+//
+// Entry timing modes:
+//   BAR_CLOSE  — alert on confirmed bar only. Use for bots and live trading.
+//   INTRABAR   — alert fires mid-bar when conditions are met. Use with caution.
+//                Not for bots. Label shows "GH INTRABAR SIGNAL".
+//
+// Alert format (WhatsApp-compatible):
+//   GH SIGNAL | JP225 | LONG | LIQ_SWEEP | SWEEP_AT_LOW | PB:10 | ES:62 | RR:3.2 | A | TOKYO
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=5
+indicator("Golden Highway v3", overlay=true,
+          max_bars_back=500, max_lines_count=30, max_labels_count=100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+i_instrument  = input.string("JP225", "Instrument",
+                  options=["JP225","DE40","UK100","US30","USTEC","HK50",
+                           "EURUSD","GBPUSD","USDJPY","USDCAD",
+                           "EURJPY","GBPJPY","XAUUSD","XAGUSD"])
+
+i_entry_mode  = input.string("BAR_CLOSE", "Entry timing",
+                  options=["BAR_CLOSE","INTRABAR"],
+                  tooltip="BAR_CLOSE: confirmed bar only — use for bots.\n" +
+                          "INTRABAR: fires mid-bar — manual trading only, not for bots.")
+
+i_min_pb      = input.int(7,   "Min pullback score (7=loose / 9=strict)", minval=1, maxval=15)
+i_min_es      = input.int(40,  "Min entry score   (40=loose / 50=strict)", minval=10, maxval=100)
+i_min_rr      = input.float(2.0, "Min R:R", minval=0.5, maxval=10.0, step=0.5)
+i_sl_mult     = input.float(1.5, "SL ATR multiplier", minval=0.5, maxval=5.0, step=0.25)
+i_tp_mult     = input.float(3.0, "TP ATR multiplier (fallback)", minval=1.0, maxval=10.0, step=0.5)
+
+i_show_table  = input.bool(true,  "Show state table")
+i_show_levels = input.bool(true,  "Show liquidity levels on chart")
+i_show_sl_tp  = input.bool(true,  "Show SL / TP lines on signal")
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. INSTRUMENT PROPERTIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Volume unavailable on cash index feeds — use ATR-based proxies instead
+f_has_volume() =>
+    i_instrument != "UK100" and i_instrument != "DE40"
+
+// Session validity per instrument (UTC hours)
+// JP225 OOS validated: London/Overlap 100% WR, Tokyo 37.5%, NY 38.9% -0.02R EV
+// Version C live config: NY BLOCKED. Tokyo + London + Overlap valid only.
+f_sess_quality(sess) =>
+    if i_instrument == "JP225"
+        (sess == "LONDON" or sess == "OVERLAP") ? "HIGH" : sess == "TOKYO" ? "MEDIUM" : "BLOCKED"
+    else if i_instrument == "DE40" or i_instrument == "UK100"
+        (sess == "LONDON" or sess == "OVERLAP") ? "HIGH" : sess == "TOKYO" ? "BLOCKED" : "MEDIUM"
+    else
+        (sess == "LONDON" or sess == "NY" or sess == "OVERLAP") ? "HIGH" : "MEDIUM"
+
+f_sess_valid(sess) =>
+    if i_instrument == "JP225"
+        // NY blocked — degrades performance (38.9% WR, -0.02R EV in OOS analysis)
+        sess == "LONDON" or sess == "OVERLAP" or sess == "TOKYO"
+    else if i_instrument == "DE40" or i_instrument == "UK100"
+        sess == "LONDON" or sess == "OVERLAP"
+    else if i_instrument == "XAUUSD" or i_instrument == "XAGUSD"
+        sess == "LONDON" or sess == "NY" or sess == "OVERLAP"
+    else
+        true
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. SESSION DETECTION  (UTC)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+_h = hour(time, "UTC")
+
+sess_label =
+    _h >= 23 or _h < 8  ? "TOKYO"     :
+    _h >= 7  and _h < 12 ? "LONDON"    :
+    _h >= 12 and _h < 16 ? "OVERLAP"   :
+    _h >= 16 and _h < 21 ? "NY"        : "OFFHOURS"
+
+in_kill_zone = (_h == 8 or _h == 9) or (_h == 13 or _h == 14)
+sess_valid   = f_sess_valid(sess_label)
+sess_quality = f_sess_quality(sess_label)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. CORE INDICATORS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+atr14   = ta.atr(14)
+ema21   = ta.ema(close, 21)
+ema50   = ta.ema(close, 50)
+ema200  = ta.ema(close, 200)
+rsi14   = ta.rsi(close, 14)
+vol_avg = ta.sma(volume, 20)
+atr_avg = ta.sma(atr14, 20)    // used for ATR dry-up proxy (no-volume instruments)
+
+// 4H context — request outside any conditional block
+htf_close = request.security(syminfo.tickerid, "240", close)
+htf_ema50 = request.security(syminfo.tickerid, "240", ta.ema(close, 50))
+htf_rsi   = request.security(syminfo.tickerid, "240", ta.rsi(close, 14))
+
+htf_bull = htf_close > htf_ema50 and htf_rsi > 45
+htf_bear = htf_close < htf_ema50 and htf_rsi < 55
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. PIVOT DETECTION  (Williams fractal, 5-bar lookback each side)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ph_raw = ta.pivothigh(high, 5, 5)   // confirmed 5 bars after pivot
+pl_raw = ta.pivotlow( low,  5, 5)
+
+// Track last two confirmed pivot highs and lows
+var float ph1 = na,  var float ph2 = na
+var float pl1 = na,  var float pl2 = na
+
+if not na(ph_raw)
+    ph2 := ph1
+    ph1 := ph_raw
+
+if not na(pl_raw)
+    pl2 := pl1
+    pl1 := pl_raw
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. MACRO STRUCTURE STATE MACHINE
+//    Simplified Pine port of macro_structure_engine.py
+//    States: EXPANSION / PULLBACK / LIQ_SWEEP / REACCUMULATION / RANGE
+//    Direction: +1 bull, -1 bear, 0 neutral
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int    macro_dir    = 0
+var float  bos_level    = na
+var string macro_state  = "RANGE"
+var string location     = "MID_RANGE"
+
+// BOS: close breaks confirmed swing extreme
+bos_bull = not na(ph1) and close > ph1 and close[1] <= ph1 and ema21 > ema200
+bos_bear = not na(pl1) and close < pl1 and close[1] >= pl1 and ema21 < ema200
+
+// CHoCH: flip from prior direction
+choch_bull = macro_dir == -1 and not na(ph1) and close > ph1
+choch_bear = macro_dir ==  1 and not na(pl1) and close < pl1
+
+if bos_bull or choch_bull
+    macro_dir  := 1
+    bos_level  := ph1
+
+if bos_bear or choch_bear
+    macro_dir  := -1
+    bos_level  := pl1
+
+// Liquidity sweep: wick beyond swing level, close recovers same bar
+bull_sweep = not na(pl1) and low  < pl1 - 0.1 * atr14 and close > pl1
+bear_sweep = not na(ph1) and high > ph1 + 0.1 * atr14 and close < ph1
+
+// Distance from BOS in ATR units (for pullback location)
+dist_bos = not na(bos_level) ? math.abs(close - bos_level) / math.max(atr14, 1e-6) : 100.0
+
+// ── State + location assignment ──────────────────────────────────────────────
+if macro_dir == 1
+    if bull_sweep
+        macro_state := "LIQ_SWEEP"
+        location    := "SWEEP_AT_LOW"
+    else if close > bos_level
+        if rsi14 > 65 and dist_bos > 4
+            macro_state := "EXPANSION"
+            location    := dist_bos > 8 ? "LATE_EXPANSION" : "MID_EXPANSION"
+        else
+            macro_state := "PULLBACK"
+            location    := dist_bos <= 1.5 ? "PULLBACK_COMPLETE" :
+                           dist_bos <= 4.0 ? "LATE_PULLBACK"     :
+                           dist_bos <= 7.0 ? "MID_PULLBACK"      : "EARLY_PULLBACK"
+    else
+        macro_state := "PULLBACK"
+        location    := dist_bos <= 2.0 ? "PULLBACK_COMPLETE" : "LATE_PULLBACK"
+
+else if macro_dir == -1
+    if bear_sweep
+        macro_state := "LIQ_SWEEP"
+        location    := "SWEEP_AT_HIGH"
+    else if close < bos_level
+        if rsi14 < 35 and dist_bos > 4
+            macro_state := "EXPANSION"
+            location    := dist_bos > 8 ? "LATE_EXPANSION" : "MID_EXPANSION"
+        else
+            macro_state := "PULLBACK"
+            location    := dist_bos <= 1.5 ? "PULLBACK_COMPLETE" :
+                           dist_bos <= 4.0 ? "LATE_PULLBACK"     :
+                           dist_bos <= 7.0 ? "MID_PULLBACK"      : "EARLY_PULLBACK"
+    else
+        macro_state := "PULLBACK"
+        location    := dist_bos <= 2.0 ? "PULLBACK_COMPLETE" : "LATE_PULLBACK"
+
+else
+    macro_state := "RANGE"
+    location    := "MID_RANGE"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. LIQUIDITY MAP
+//    Internal: level on opposite side of price from trade direction
+//              (below price for bull = pullback/sweep targets)
+//    External: level ahead of price in trade direction
+//              (above price for bull = expansion targets)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Internal liquidity (where price came FROM)
+int_liq = macro_dir ==  1 ? (not na(pl1) ? pl1 : na) :
+          macro_dir == -1 ? (not na(ph1) ? ph1 : na) : na
+
+// External liquidity (where price is GOING)
+ext_liq = macro_dir ==  1 ? (not na(ph1) and ph1 > close ? ph1 :
+                              not na(ph2) and ph2 > close ? ph2 : na) :
+          macro_dir == -1 ? (not na(pl1) and pl1 < close ? pl1 :
+                              not na(pl2) and pl2 < close ? pl2 : na) : na
+
+// SL placement
+sl_dist = i_sl_mult * atr14
+sl_bull = close - sl_dist
+sl_bear = close + sl_dist
+
+// R:R to external target (fallback to ATR-multiple if no ext level)
+rr_to_ext =
+    macro_dir == 1 and not na(ext_liq) and ext_liq > close ?
+        (ext_liq - close) / math.max(sl_dist, 1e-6) :
+    macro_dir == -1 and not na(ext_liq) and ext_liq < close ?
+        (close - ext_liq) / math.max(sl_dist, 1e-6) : 0.0
+
+rr_avail  = math.max(rr_to_ext, i_tp_mult)   // floor = tp_mult when no ext level
+
+near_int  = not na(int_liq) and math.abs(close - int_liq) < 1.5 * atr14
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. PULLBACK SCORE  (7-check, 0-15)
+//    C1 Micro RSI (0-3)   C2 Location (0-3)   C3 Liq level (0-2)
+//    C4 Vol dry-up (0-2)  C5 Fractal (0-2)    C6 HTF align (0-2)
+//    C7 Flow turn (0-1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// C1: RSI oversold/overbought
+c1 = macro_dir ==  1 ? (rsi14 < 35 ? 3 : rsi14 < 45 ? 2 : rsi14 < 55 ? 1 : 0) :
+     macro_dir == -1 ? (rsi14 > 65 ? 3 : rsi14 > 55 ? 2 : rsi14 > 45 ? 1 : 0) : 0
+
+// C2: Location quality
+c2 = location == "PULLBACK_COMPLETE" or
+     location == "SWEEP_AT_LOW"      or
+     location == "SWEEP_AT_HIGH"      ? 3 :
+     location == "LATE_PULLBACK"      ? 2 :
+     location == "MID_PULLBACK"       ? 1 : 0
+
+// C3: Liquidity level at price (reward: price sitting at a known level)
+c3 = near_int ? 2 : 0
+
+// C4: Volume / ATR dry-up
+c4 = f_has_volume() ?
+        (volume < 0.70 * vol_avg ? 2 : volume < 0.85 * vol_avg ? 1 : 0) :
+        (atr14  < 0.75 * atr_avg ? 2 : atr14  < 0.85 * atr_avg ? 1 : 0)
+
+// C5: Fractal / consolidation forming
+body_pct = high != low ? math.abs(close - open) / (high - low) : 1.0
+is_doji  = body_pct < 0.30
+is_inside = high < high[1] and low > low[1]
+c5 = (is_doji or is_inside) and near_int ? 2 :
+     (is_doji or is_inside)               ? 1 : 0
+
+// C6: HTF alignment (4H agrees with direction)
+c6 = macro_dir ==  1 and htf_bull ? 2 :
+     macro_dir == -1 and htf_bear ? 2 :
+     macro_dir ==  1 and not htf_bear ? 1 :
+     macro_dir == -1 and not htf_bull ? 1 : 0
+
+// C7: Flow turn (bullish/bearish engulf)
+bull_engulf = close > open and close > high[1] and open < close[1]
+bear_engulf = close < open and close < low[1]  and open > close[1]
+c7 = macro_dir ==  1 and bull_engulf ? 1 :
+     macro_dir == -1 and bear_engulf ? 1 : 0
+
+pb_total = c1 + c2 + c3 + c4 + c5 + c6 + c7
+
+pb_grade = pb_total >= 13 ? "MAXIMUM" :
+           pb_total >= 10 ? "HIGH"    :
+           pb_total >= 7  ? "MEDIUM"  :
+           pb_total >= 4  ? "WEAK"    : "NONE"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 9. ENTRY SCORE  (5 layers × 20 = 100)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// L1: Macro structural state
+l1 = macro_state == "PULLBACK"       ? 20 :
+     macro_state == "LIQ_SWEEP"      ? 18 :
+     macro_state == "REACCUMULATION" ? 16 :
+     macro_state == "EXPANSION"      ? 10 : 0
+
+// L2: Location quality + session bonus
+loc_pts   = location == "PULLBACK_COMPLETE" or
+            location == "SWEEP_AT_LOW"      or
+            location == "SWEEP_AT_HIGH"      ? 16 :
+            location == "LATE_PULLBACK"      ? 13 :
+            location == "MID_PULLBACK"       ?  8 : 0
+sess_pts  = in_kill_zone and sess_valid ? 4 : sess_valid ? 2 : 0
+l2        = math.min(20, loc_pts + sess_pts)
+
+// L3: Liquidity R:R + level quality
+rr_pts    = rr_avail >= 4.0 ? 10 : rr_avail >= 3.0 ? 8 :
+            rr_avail >= 2.5 ?  6 : rr_avail >= 2.0 ? 4 : 0
+ext_pts   = not na(ext_liq) ? 6 : 0
+int_pts   = near_int        ? 4 : 0
+l3        = math.min(20, rr_pts + ext_pts + int_pts)
+
+// L4: Markov continuation probability (not wired yet — always 0)
+l4 = 0
+
+// L5: Pullback completion + momentum
+pb_base   = pb_total >= 13 ? 18 : pb_total >= 10 ? 14 :
+            pb_total >= 7  ? 10 : pb_total >= 4  ?  5 : 1
+l5        = math.min(20, pb_base)
+
+entry_score = l1 + l2 + l3 + l4 + l5
+
+entry_grade = entry_score >= 80 ? "A+" :
+              entry_score >= 65 ? "A"  :
+              entry_score >= 50 ? "B"  : "SKIP"
+
+size_label  = entry_grade == "A+" ? "FULL"   :
+              entry_grade == "A"  ? "75%"    :
+              entry_grade == "B"  ? "50%"    : "SKIP"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 10. GATE CHECK  (all 7 must pass)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+g1_state  = macro_state == "PULLBACK" or macro_state == "LIQ_SWEEP" or
+            macro_state == "REACCUMULATION"
+
+g2_loc    = location == "LATE_PULLBACK"      or location == "PULLBACK_COMPLETE" or
+            location == "REACCUM_CONFIRMED"  or
+            location == "SWEEP_AT_LOW"       or location == "SWEEP_AT_HIGH"
+
+g3_sess   = sess_valid
+
+g5_rr     = rr_avail   >= i_min_rr
+g6_pb     = pb_total   >= i_min_pb
+g7_es     = entry_score >= i_min_es
+
+gates_n   = (g1_state ? 1 : 0) + (g2_loc ? 1 : 0) + (g3_sess ? 1 : 0) +
+            (g5_rr    ? 1 : 0) + (g6_pb  ? 1 : 0) + (g7_es   ? 1 : 0)
+all_gates = g1_state and g2_loc and g3_sess and g5_rr and g6_pb and g7_es
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 11. ANTI-SPAM  (G4 — min 5 bars between signals, same BOS not reused)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int   last_sig_bar  = -20
+var float last_bos_used = na
+
+bars_since = bar_index - last_sig_bar
+bos_reused = not na(last_bos_used) and not na(bos_level) and
+             math.abs(bos_level - last_bos_used) < 0.5 * atr14
+
+g4_antispam = bars_since >= 5 and not bos_reused
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 12. SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+raw_signal = all_gates and g4_antispam and macro_dir != 0
+
+// BAR_CLOSE: only fire on confirmed (closed) bar
+// INTRABAR:  fire as soon as conditions met within the live bar
+fire_signal = i_entry_mode == "BAR_CLOSE" ?
+              (raw_signal and barstate.isconfirmed) :
+              raw_signal
+
+if fire_signal
+    last_sig_bar  := bar_index
+    last_bos_used := bos_level
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 13. CHART DRAWINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Liquidity level lines ────────────────────────────────────────────────────
+plot(i_show_levels and not na(int_liq) ? int_liq : na,
+     "Internal Liq", color.new(color.orange, 35), 1, plot.style_linebr)
+plot(i_show_levels and not na(ext_liq) ? ext_liq : na,
+     "External Liq", color.new(color.teal,   35), 1, plot.style_linebr)
+plot(i_show_levels and not na(bos_level) ? bos_level : na,
+     "BOS Level", color.new(#4488FF, 55), 1, plot.style_linebr)
+
+// ── Entry labels ─────────────────────────────────────────────────────────────
+_dir_str = macro_dir == 1 ? "LONG" : "SHORT"
+_mode_tag = i_entry_mode == "INTRABAR" ? "GH INTRABAR SIGNAL\n" : "GH ENTRY\n"
+
+// Session conviction note — Version C live config
+_sess_note = sess_quality == "HIGH" ? "  HIGH CONVICTION" : sess_quality == "MEDIUM" ? "  ok session" : sess_quality == "BLOCKED" ? "  NY BLOCKED" : "  session blocked"
+
+_label_txt = _mode_tag +
+             _dir_str + "  " + entry_grade + "  " + str.tostring(entry_score) + "/100  " + size_label + "\n" +
+             macro_state + "  " + location + "\n" +
+             "PB: " + str.tostring(pb_total) + "/15  " + pb_grade + "\n" +
+             "RR: " + str.tostring(math.round(rr_avail, 1)) + ":1  " +
+             "SL: " + str.tostring(math.round(macro_dir == 1 ? sl_bull : sl_bear)) + "\n" +
+             sess_label + _sess_note
+
+_sig_col = macro_dir == 1 ? color.new(color.lime, 0) : color.new(color.red, 0)
+
+if fire_signal
+    _y = macro_dir == 1 ? low  - 1.2 * atr14 : high + 1.2 * atr14
+    _style = macro_dir == 1 ? label.style_label_up : label.style_label_down
+    label.new(bar_index, _y, _label_txt,
+              style=_style, color=_sig_col,
+              textcolor=color.black, size=size.small)
+
+// ── SL / TP lines from signal bar ────────────────────────────────────────────
+if fire_signal and i_show_sl_tp
+    _sl  = macro_dir == 1 ? sl_bull : sl_bear
+    _tp2 = macro_dir == 1 ? close + i_tp_mult * sl_dist : close - i_tp_mult * sl_dist
+    _tp1 = macro_dir == 1 ? close + 1.5 * sl_dist : close - 1.5 * sl_dist
+    line.new(bar_index, _sl,  bar_index + 30, _sl,
+             color=color.new(color.red,    20), style=line.style_dashed, width=1)
+    line.new(bar_index, _tp1, bar_index + 30, _tp1,
+             color=color.new(color.green,  50), style=line.style_dotted, width=1)
+    line.new(bar_index, _tp2, bar_index + 30, _tp2,
+             color=color.new(color.green,  20), style=line.style_dashed, width=1)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 14. STATE TABLE  (top-left dashboard)
+//     Rows: INSTRUMENT / MACRO STATE / LOCATION / INT LIQ / EXT LIQ /
+//           RR AVAIL / PULLBACK SCR / ENTRY SCORE / GRADE / SESSION / GATES / MODE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Colour helpers
+_c_ok   = color.new(color.lime,   60)
+_c_warn = color.new(color.orange, 60)
+_c_fail = color.new(color.red,    60)
+_c_head = color.new(color.gray,   70)
+_c_bg   = color.new(color.black,  20)
+_c_gold = color.new(#FFD700, 0)
+_c_wht  = color.white
+_c_sil  = color.new(color.silver, 10)
+
+// Row helper (requires table reference as first argument)
+_trow(tbl, r, lbl, val, vc) =>
+    table.cell(tbl, 0, r, lbl, text_color=_c_sil, bgcolor=_c_head, text_size=size.small)
+    table.cell(tbl, 1, r, val, text_color=vc,      bgcolor=_c_bg,   text_size=size.small)
+
+var table dash = na
+
+if i_show_table and barstate.islast
+    if not na(dash)
+        table.delete(dash)
+
+    dash := table.new(position.top_left, 2, 14,
+                      bgcolor       = color.new(color.black, 10),
+                      border_width  = 1,
+                      border_color  = color.new(color.gray, 60),
+                      frame_width   = 1,
+                      frame_color   = color.new(color.gray, 40))
+
+    // Row 0 — title bar
+    table.cell(dash, 0, 0, "GOLDEN HIGHWAY v3",
+               text_color=_c_gold, bgcolor=color.new(color.black, 5),
+               text_size=size.small, text_halign=text.align_center)
+    table.cell(dash, 1, 0, i_instrument + "  " + timeframe.period + "  [" + _dir_str + "]",
+               text_color=_c_gold, bgcolor=color.new(color.black, 5),
+               text_size=size.small, text_halign=text.align_center)
+
+    // Row 1 — macro state
+    _state_col = g1_state ? _c_ok : macro_state == "EXPANSION" ? _c_warn : _c_fail
+    _trow(dash, 1, "MACRO STATE",
+          macro_state + (macro_dir == 1 ? " ▲" : macro_dir == -1 ? " ▼" : ""),
+          _state_col)
+
+    // Row 2 — location
+    _trow(dash, 2, "LOCATION", location, g2_loc ? _c_ok : _c_warn)
+
+    // Row 3 — internal liquidity
+    _int_str = not na(int_liq) ? str.tostring(math.round(int_liq)) +
+               (near_int ? "  << AT PRICE" : "") : "—"
+    _trow(dash, 3, "INT LIQ", _int_str, color.new(color.orange, 0))
+
+    // Row 4 — external liquidity (target)
+    _ext_str = not na(ext_liq) ? str.tostring(math.round(ext_liq)) : "—"
+    _trow(dash, 4, "EXT LIQ", _ext_str, color.new(color.teal, 0))
+
+    // Row 5 — R:R
+    _rr_str = str.tostring(math.round(rr_avail, 1)) + ":1"
+    _trow(dash, 5, "RR AVAIL", _rr_str, g5_rr ? _c_ok : _c_fail)
+
+    // Row 6 — pullback score
+    _pb_str = str.tostring(pb_total) + "/15  " + pb_grade
+    _trow(dash, 6, "PULLBACK SCR", _pb_str, g6_pb ? _c_ok : pb_total >= 4 ? _c_warn : _c_fail)
+
+    // Row 7 — entry score
+    _es_str = str.tostring(entry_score) + "/100  " + entry_grade
+    _trow(dash, 7, "ENTRY SCORE", _es_str, g7_es ? _c_ok : entry_score >= 30 ? _c_warn : _c_fail)
+
+    // Row 8 — session conviction (Version C: JP225 NY blocked)
+    _sess_col  = sess_quality == "HIGH"    ? _c_ok   :
+                 sess_quality == "MEDIUM"  ? _c_warn :
+                 _c_fail
+    _sess_str  = i_instrument == "JP225" and sess_label == "LONDON" ? "LONDON ***" : i_instrument == "JP225" and sess_label == "OVERLAP" ? "OVERLAP ***" : i_instrument == "JP225" and sess_label == "TOKYO" ? "TOKYO **" : i_instrument == "JP225" and sess_label == "NY" ? "NY -- BLOCKED" : sess_label + "  [" + sess_quality + "]"
+    _trow(dash, 8, "SESSION", _sess_str, _sess_col)
+
+    // Row 9 — gate summary  (SLERPX)
+    // S=state  L=location  E=session  R=rr  P=pullback  X=entry_score
+    // Session E: uppercase=valid(HIGH), ~=valid(MEDIUM), lowercase=blocked
+    _e_char = not g3_sess ? "e" : sess_quality == "HIGH" ? "E" : "~"
+    _g_str = str.tostring(gates_n) + "/6 gates  " +
+             (g1_state ? "S" : "s") + (g2_loc ? "L" : "l") + _e_char +
+             (g5_rr    ? "R" : "r") + (g6_pb  ? "P" : "p") + (g7_es  ? "X" : "x")
+    _trow(dash, 9, "GATES", _g_str, gates_n == 6 ? _c_ok : gates_n >= 4 ? _c_warn : _c_fail)
+
+    // Row 10 — grade + size
+    _grade_col = entry_grade == "A+" or entry_grade == "A" ? _c_ok :
+                 entry_grade == "B"                         ? _c_warn : _c_fail
+    _trow(dash, 10, "GRADE", entry_grade + "  ->  " + size_label + " SIZE", _grade_col)
+
+    // Row 11 — signal status
+    _active    = all_gates and g4_antispam and macro_dir != 0
+    _sig_label = _active ?
+                 (i_entry_mode == "INTRABAR" ? "INTRABAR SIGNAL" : "AWAITING CLOSE") :
+                 "NO SIGNAL"
+    _trow(dash, 11, "SIGNAL", _sig_label, _active ? _c_ok : color.new(color.gray, 30))
+
+    // Row 12 — L4 Markov placeholder
+    _trow(dash, 12, "L4 MARKOV", "0 pts  (not wired)", color.new(color.gray, 30))
+
+    // Row 13 — entry mode note
+    _mode_note = i_entry_mode == "INTRABAR" ?
+                 "INTRABAR — manual only, NOT for bots" :
+                 "BAR_CLOSE — bots + live"
+    _trow(dash, 13, "MODE", _mode_note, color.new(color.silver, 20))
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 15. ALERTS  (WhatsApp-compatible format)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+_rr_rounded = str.tostring(math.round(rr_avail, 1))
+_alert_body = "GH SIGNAL | " + i_instrument +
+              " | " + _dir_str +
+              " | " + macro_state +
+              " | " + location +
+              " | PB:" + str.tostring(pb_total) +
+              " | ES:" + str.tostring(entry_score) +
+              " | RR:" + _rr_rounded +
+              " | " + entry_grade +
+              " | " + sess_label +
+              " | SL:" + str.tostring(math.round(macro_dir == 1 ? sl_bull : sl_bear)) +
+              (i_entry_mode == "INTRABAR" ? " | INTRABAR" : "")
+
+alertcondition(fire_signal and macro_dir ==  1,
+               title   = "GH LONG Signal",
+               message = _alert_body)
+
+alertcondition(fire_signal and macro_dir == -1,
+               title   = "GH SHORT Signal",
+               message = _alert_body)
+
+alertcondition(fire_signal,
+               title   = "GH Signal (any direction)",
+               message = _alert_body)
