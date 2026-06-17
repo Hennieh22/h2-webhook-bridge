@@ -30,6 +30,7 @@ from flask import Flask, jsonify, send_from_directory, Response
 ROOT        = Path(__file__).resolve().parent.parent
 DASHBOARD   = Path(__file__).resolve().parent
 LIVE_STATE  = ROOT / "outputs" / "H2_live_state.json"
+NEWS_STATE  = ROOT / "outputs" / "H2_news_status.json"
 
 app = Flask(__name__, static_folder=str(DASHBOARD))
 
@@ -159,6 +160,22 @@ def live_state_instrument_options(instrument: str):
     resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
+
+
+# ── News status endpoint ─────────────────────────────────────────────────────
+@app.route("/news/status")
+def news_status():
+    if not NEWS_STATE.exists():
+        return jsonify({"error": "News poller not yet run — H2_news_status.json missing"}), 404
+    try:
+        with open(NEWS_STATE, encoding="utf-8") as f:
+            data = json.load(f)
+        resp = Response(json.dumps(data, indent=2), mimetype="application/json")
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────

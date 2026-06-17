@@ -1,3 +1,4 @@
 flask
 gunicorn
 pyyaml
+feedparser>=6.0.8
