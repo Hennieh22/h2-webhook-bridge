@@ -140,6 +140,28 @@ def fetch_prices() -> Dict:
 
     return prices
 
+# ── Fetch live VWAP state from Railway and cache locally ─────────────────────
+def fetch_live_state() -> bool:
+    """
+    Fetches live VWAP destinations from Railway POST /live_state endpoint
+    and writes them to outputs/H2_live_state.json for build_ladder_from_live_state().
+    Returns True if live state was fetched and cached.
+    """
+    state_path = Path("outputs/H2_live_state.json")
+    try:
+        r = requests.get(f"{RAILWAY_URL}/live_state", timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            if data and isinstance(data, dict) and len(data) > 0:
+                with open(state_path, "w") as f:
+                    json.dump(data, f, indent=2)
+                symbols = list(data.keys())
+                print(f"[LIVE_STATE] Fetched {len(symbols)} instruments: {symbols}")
+                return True
+    except Exception as e:
+        print(f"[LIVE_STATE] {e}")
+    return False
+
 # ── Fetch Railway news status ─────────────────────────────────────────────────
 def fetch_news_status() -> Dict:
     try:
@@ -281,6 +303,7 @@ def check_destination_flip(instr: str, current_d1: float,
 def run_scan(verbose: bool = True):
     now_utc = datetime.now(timezone.utc)
     session = get_current_session()
+    fetch_live_state()   # refresh H2_live_state.json from Railway if available
     prices  = fetch_prices()
     news    = fetch_news_status()
     prev_state = load_state()

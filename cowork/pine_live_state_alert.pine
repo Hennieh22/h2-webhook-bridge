@@ -1,0 +1,51 @@
+// H2 Live State Alert — add this block to H2_MTF_v1.pine (Panel 4)
+//
+// Place at the bottom of your existing indicator script.
+// Uses the VWAP destination variables already computed by Panel 4.
+// Fires on every bar close to keep Railway live_state fresh.
+//
+// Prerequisites:
+//   dest_1h, dir_1h  — your 1H VWAP destination value and direction ("UP"/"DOWN")
+//   dest_4h, dir_4h  — your 4H VWAP destination value and direction
+//   dest_d,  dir_d   — your Daily VWAP destination value and direction
+//   regime_str       — "TRENDING"/"WITHIN"/"EXPANSION" etc.
+//   journey_val      — integer journey state (1/2/3/4)
+//
+// If your variable names differ, adjust the references below.
+
+// ── Alert JSON payload ────────────────────────────────────────────────────────
+// Build the JSON string using str.tostring() for each value.
+// Pine does not have native JSON serialisation, so we construct it manually.
+
+live_state_json = '{"type":"live_state"' +
+     ',"symbol":"'       + syminfo.ticker + '"' +
+     ',"dest_1h":'       + str.tostring(dest_1h,   "#.##") +
+     ',"dir_1h":"'       + dir_1h + '"' +
+     ',"dest_4h":'       + str.tostring(dest_4h,   "#.##") +
+     ',"dir_4h":"'       + dir_4h + '"' +
+     ',"dest_d":'        + str.tostring(dest_d,    "#.##") +
+     ',"dir_d":"'        + dir_d + '"' +
+     ',"regime":"'       + regime_str + '"' +
+     ',"journey_state":' + str.tostring(journey_val) +
+     ',"timestamp":'     + str.tostring(math.round(time / 1000)) +
+     '}'
+
+// ── Alert condition: fire on every bar close ───────────────────────────────────
+// Use alertcondition() so the user sets the webhook URL in the alert dialog.
+alertcondition(
+     barstate.isconfirmed,
+     title    = "H2 Live State — Bar Close",
+     message  = live_state_json
+)
+
+// ── How to activate ──────────────────────────────────────────────────────────
+// 1. Add this code to H2_MTF_v1.pine (Panel 4 indicator)
+// 2. On TradingView: click the bell icon on the indicator → Create alert
+// 3. Condition: "H2 Live State — Bar Close"
+// 4. Frequency: "Once per bar close"
+// 5. Alert actions → Webhook URL:
+//       https://h2-webhook-bridge-production.up.railway.app/live_state
+// 6. Save the alert on each chart/instrument you want to track
+//    (JP225, XAUUSD, etc. — one alert per chart)
+//
+// The scan will pick up live destinations within 15 minutes (next scan run).
