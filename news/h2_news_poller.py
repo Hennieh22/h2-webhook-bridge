@@ -39,7 +39,7 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 ROOT          = Path(__file__).resolve().parent.parent
 OUTPUTS       = ROOT / "outputs"
-OUTPUTS.mkdir(exist_ok=True)
+OUTPUTS.mkdir(parents=True, exist_ok=True)
 
 NEWS_OUT      = OUTPUTS / "H2_news_status.json"
 TREASURY_CACHE = OUTPUTS / "H2_treasury_cache.json"

@@ -164,6 +164,24 @@ def live_state_instrument_options(instrument: str):
     return resp
 
 
+# ── News debug endpoint ──────────────────────────────────────────────────────
+@app.route("/news/debug")
+def news_debug():
+    poller_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'news', 'h2_news_poller.py'))
+    outputs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'outputs'))
+    news_file   = os.path.join(outputs_dir, 'H2_news_status.json')
+    return jsonify({
+        "poller_file_exists": os.path.exists(poller_path),
+        "poller_path":        poller_path,
+        "outputs_dir_exists": os.path.exists(outputs_dir),
+        "outputs_dir":        outputs_dir,
+        "news_json_exists":   os.path.exists(news_file),
+        "news_json_path":     news_file,
+        "thread_alive":       _poller_thread.is_alive(),
+        "cwd":                os.getcwd(),
+    })
+
+
 # ── News status endpoint ─────────────────────────────────────────────────────
 @app.route("/news/status")
 def news_status():
