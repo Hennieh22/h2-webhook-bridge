@@ -32,7 +32,7 @@ from flask import Flask, jsonify, send_from_directory, Response
 ROOT        = Path(__file__).resolve().parent.parent
 DASHBOARD   = Path(__file__).resolve().parent
 LIVE_STATE  = ROOT / "outputs" / "H2_live_state.json"
-NEWS_STATE  = ROOT / "outputs" / "H2_news_status.json"
+NEWS_STATE  = Path(__file__).parent.parent / "outputs" / "H2_news_status.json"
 
 app = Flask(__name__, static_folder=str(DASHBOARD))
 
