@@ -108,62 +108,46 @@ def _fetch_json(url: str, timeout: int = 10) -> list | dict | None:
         return None
 
 
-# ── Source 1: US Treasury daily yield curve (free, no API key) ───────────────
+# ── Source 1: US Treasury fiscaldata.gov (free, no API key) ──────────────────
 def fetch_treasury_rates() -> dict:
-    """Fetch US Treasury DAILY yield curve rates — free, no API key."""
+    """Fetch US Treasury rates from fiscaldata.treasury.gov — free, no API key.
+    Publishes end-of-month averages: Bills=~2Y proxy, Notes=~10Y proxy, Bonds=30Y.
+    """
     if not HAS_REQUESTS:
         log.warning("[TREASURY] requests library not available")
         return {}
     try:
-        import datetime as _dt
-        today = _dt.date.today()
-        year_month = today.strftime("%Y%m")
         url = (
-            f"https://home.treasury.gov/resource-center/data-chart-center"
-            f"/interest-rates/pages/xml?data=daily_treas_bill_rates"
-            f"&field_tdr_date_value={year_month}"
+            "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
+            "/v2/accounting/od/avg_interest_rates"
+            "?fields=record_date,security_desc,avg_interest_rate_amt"
+            "&filter=security_type_desc:eq:Marketable"
+            "&sort=-record_date&limit=20"
         )
-        log.info("[TREASURY] Fetching daily yield curve for %s", year_month)
+        log.info("[TREASURY] Fetching from fiscaldata.treasury.gov...")
         r = _requests.get(url, timeout=10)
-        if r.status_code != 200:
-            # Fallback: previous month
-            prev = (today.replace(day=1) - _dt.timedelta(days=1))
-            url = (
-                f"https://home.treasury.gov/resource-center/data-chart-center"
-                f"/interest-rates/pages/xml?data=daily_treas_bill_rates"
-                f"&field_tdr_date_value={prev.strftime('%Y%m')}"
-            )
-            log.info("[TREASURY] Falling back to %s", prev.strftime("%Y%m"))
-            r = _requests.get(url, timeout=10)
-
         log.info("[TREASURY] Status: %s", r.status_code)
-        root = ET.fromstring(r.content)
-
-        entries = root.findall(".//{http://www.w3.org/2005/Atom}entry")
-        if not entries:
-            log.warning("[TREASURY] No entries in XML")
+        if r.status_code != 200:
+            log.warning("[TREASURY] Non-200 response: %s", r.text[:200])
+            return {}
+        rates_data = [
+            x for x in r.json().get("data", [])
+            if x.get("record_date") and x.get("avg_interest_rate_amt", "").replace(".", "").isdigit()
+        ]
+        if not rates_data:
+            log.warning("[TREASURY] No usable records returned")
             return {}
 
-        latest = entries[-1]
-        props = latest.find(
-            ".//{http://schemas.microsoft.com/ado/2007/08/dataservices/metadata}properties"
-        )
-
-        def _get(tag):
-            el = props.find(f"{{http://schemas.microsoft.com/ado/2007/08/dataservices}}{tag}")
-            try:
-                return float(el.text) if el is not None and el.text else None
-            except (ValueError, TypeError):
-                return None
-
-        us2y  = _get("BC_2YEAR")
-        us10y = _get("BC_10YEAR")
-        us30y = _get("BC_30YEAR")
-        date_el = props.find("{http://schemas.microsoft.com/ado/2007/08/dataservices}NEW_DATE")
-        as_of = date_el.text[:10] if date_el is not None and date_el.text else None
+        us2y  = next((float(x["avg_interest_rate_amt"]) for x in rates_data
+                      if x.get("security_desc") == "Treasury Bills"), None)
+        us10y = next((float(x["avg_interest_rate_amt"]) for x in rates_data
+                      if x.get("security_desc") == "Treasury Notes"), None)
+        us30y = next((float(x["avg_interest_rate_amt"]) for x in rates_data
+                      if x.get("security_desc") == "Treasury Bonds"), None)
+        as_of = rates_data[0]["record_date"]
 
         spread = round(us10y - us2y, 3) if (us10y is not None and us2y is not None) else None
-        log.info("[TREASURY] us2y=%s us10y=%s us30y=%s as_of=%s", us2y, us10y, us30y, as_of)
+        log.info("[TREASURY] us2y=%s us10y=%s us30y=%s spread=%s as_of=%s", us2y, us10y, us30y, spread, as_of)
 
         return {
             "us2y":         us2y,
@@ -172,10 +156,10 @@ def fetch_treasury_rates() -> dict:
             "spread_2s10s": spread,
             "yield_curve":  "INVERTED" if (spread is not None and spread < 0) else "NORMAL",
             "as_of":        as_of,
-            "source":       "US Treasury daily yield curve",
+            "source":       "US Treasury fiscaldata.gov (monthly avg)",
         }
     except Exception as e:
-        log.error("[TREASURY] Daily curve error: %s", e)
+        log.error("[TREASURY] Error: %s", e)
         return {}
 
 
