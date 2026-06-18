@@ -100,19 +100,44 @@ def fetch_prices() -> Dict:
         except Exception as e:
             print(f"[PRICES] frankfurter: {e}")
 
-    # FMP for metals/commodities
-    if FMP_KEY:
-        for sym, name in [("GCUSD","XAUUSD"),("SIUSD","XAGUSD")]:
+    # Metals via metals.live (free, no key)
+    try:
+        r = requests.get("https://metals.live/api/v1/spot", timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            for item in data:
+                sym = item.get("symbol", "").upper()
+                price_val = item.get("price", 0)
+                if sym == "XAU":
+                    prices["XAUUSD"] = round(float(price_val), 2)
+                elif sym == "XAG":
+                    prices["XAGUSD"] = round(float(price_val), 4)
+            print(f"[METALS] metals.live: XAUUSD={prices.get('XAUUSD','–')} XAGUSD={prices.get('XAGUSD','–')}")
+    except Exception as e:
+        print(f"[METALS] metals.live: {e}")
+
+    # Fallback: FMP with XAUUSD/XAGUSD symbol format
+    if "XAUUSD" not in prices and FMP_KEY:
+        for fmp_sym, h2_name in [("XAUUSD", "XAUUSD"), ("XAGUSD", "XAGUSD")]:
             try:
                 r = requests.get(
-                    f"https://financialmodelingprep.com/api/v3/quote/{sym}",
+                    f"https://financialmodelingprep.com/api/v3/quote/{fmp_sym}",
                     params={"apikey": FMP_KEY}, timeout=8)
                 if r.status_code == 200:
                     data = r.json()
                     if data:
-                        prices[name] = data[0].get("price", 0)
-            except:
-                pass
+                        prices[h2_name] = data[0].get("price", 0)
+                        print(f"[METALS] FMP {h2_name}: {prices[h2_name]}")
+            except Exception as e:
+                print(f"[METALS] FMP {fmp_sym}: {e}")
+
+    # Final fallback: approximate prices (ATR only — flagged)
+    if "XAUUSD" not in prices:
+        prices["XAUUSD"] = 4300.0
+        print("[METALS] Using XAUUSD fallback price 4300")
+    if "XAGUSD" not in prices:
+        prices["XAGUSD"] = 32.50
+        print("[METALS] Using XAGUSD fallback price 32.50")
 
     return prices
 
@@ -268,7 +293,7 @@ def run_scan(verbose: bool = True):
         cfg   = INSTRUMENTS[instr]
         price = prices.get(instr, 0)
 
-        # Placeholder prices for index instruments without direct price feed
+        # Placeholder prices for instruments without direct price feed
         if price == 0:
             if instr in ["JP225","NI225"]:  price = 70000.0
             elif instr in ["DE40","CAC40"]: price = 24000.0
@@ -278,6 +303,8 @@ def run_scan(verbose: bool = True):
             elif instr in ["UK100"]:        price = 8400.0
             elif instr in ["AUS200"]:       price = 8200.0
             elif instr in ["HSI"]:          price = 23000.0
+            elif instr == "XAUUSD":         price = 4300.0
+            elif instr == "XAGUSD":         price = 32.50
             else: continue
 
         atr = price * cfg["atr_pct"]
