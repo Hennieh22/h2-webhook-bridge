@@ -50,33 +50,129 @@ def fmp_get(endpoint: str, params: dict = {}) -> Optional[list]:
         return None
 
 def fetch_forex_quotes() -> Dict:
-    """Fetch live FX quotes for all major pairs"""
-    pairs = ["USDJPY","EURUSD","GBPUSD","AUDUSD","USDCNH","USDCHF","USDCAD"]
+    """Fetch live FX quotes using supported FMP endpoints"""
     results = {}
+
+    # Method 1: Try FMP v3 forex-quote endpoint (supported on free tier)
+    pairs = ["USDJPY", "EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF"]
     for pair in pairs:
-        data = fmp_get(f"fx/{pair}")
-        if data and len(data) > 0:
-            d = data[0]
-            results[pair] = {
-                "price":  d.get("ask", d.get("price", 0)),
-                "change": d.get("changes", 0),
-                "change_pct": round(d.get("changes", 0) / d.get("ask", 1) * 100, 4)
-                    if d.get("ask", 0) > 0 else 0
-            }
+        try:
+            r = requests.get(
+                f"https://financialmodelingprep.com/api/v3/fx/{pair}",
+                params={"apikey": FMP_KEY},
+                timeout=8
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data and len(data) > 0:
+                    d = data[0]
+                    price = d.get("ask", d.get("price", d.get("bid", 0)))
+                    prev  = d.get("open", price)
+                    chg   = round((price - prev) / prev * 100, 4) if prev > 0 else 0
+                    results[pair] = {
+                        "price":      round(float(price), 5),
+                        "change_pct": chg,
+                        "change":     round(float(price - prev), 5),
+                    }
+        except Exception as e:
+            print(f"[FMP FX] {pair}: {e}")
+
+    # Method 2: Fallback to exchangerate-api.com (free, no key needed)
+    if len(results) < 3:
+        try:
+            r = requests.get(
+                "https://open.er-api.com/v6/latest/USD",
+                timeout=8
+            )
+            if r.status_code == 200:
+                data = r.json()
+                rates = data.get("rates", {})
+                pair_map = {
+                    "USDJPY": rates.get("JPY"),
+                    "EURUSD": 1/rates.get("EUR", 1) if rates.get("EUR") else None,
+                    "GBPUSD": 1/rates.get("GBP", 1) if rates.get("GBP") else None,
+                    "AUDUSD": 1/rates.get("AUD", 1) if rates.get("AUD") else None,
+                    "USDCAD": rates.get("CAD"),
+                    "USDCHF": rates.get("CHF"),
+                }
+                for pair, price in pair_map.items():
+                    if price and pair not in results:
+                        results[pair] = {
+                            "price":      round(float(price), 5),
+                            "change_pct": 0.0,
+                            "change":     0.0,
+                            "source":     "exchangerate-api"
+                        }
+            print(f"[FX] Fallback exchangerate-api: {len(results)} pairs loaded")
+        except Exception as e:
+            print(f"[FX FALLBACK] {e}")
+
+    # Method 3: If still empty, try frankfurter.app (ECB rates, free, no key)
+    if len(results) < 3:
+        try:
+            r = requests.get(
+                "https://api.frankfurter.app/latest?from=USD",
+                timeout=8
+            )
+            if r.status_code == 200:
+                data = r.json()
+                rates = data.get("rates", {})
+                pair_map = {
+                    "USDJPY": rates.get("JPY"),
+                    "EURUSD": 1/rates.get("EUR", 1) if rates.get("EUR") else None,
+                    "GBPUSD": 1/rates.get("GBP", 1) if rates.get("GBP") else None,
+                    "AUDUSD": 1/rates.get("AUD", 1) if rates.get("AUD") else None,
+                }
+                for pair, price in pair_map.items():
+                    if price and pair not in results:
+                        results[pair] = {
+                            "price":      round(float(price), 5),
+                            "change_pct": 0.0,
+                            "change":     0.0,
+                            "source":     "frankfurter-ecb"
+                        }
+            print(f"[FX] Frankfurter ECB: {len(results)} pairs loaded")
+        except Exception as e:
+            print(f"[FX FRANKFURTER] {e}")
+
+    print(f"[FX] Total pairs loaded: {len(results)} — {list(results.keys())}")
     return results
 
 def fetch_commodity_quotes() -> Dict:
-    """Fetch gold, silver, oil"""
+    """Fetch gold, silver, oil from FMP or fallback sources"""
     results = {}
-    for sym, name in [("GCUSD","XAUUSD"),("SIUSD","XAGUSD"),("CLUSD","USOIL")]:
-        data = fmp_get(f"quote/{sym}")
-        if data and len(data) > 0:
-            d = data[0]
-            results[name] = {
-                "price":      d.get("price", 0),
-                "change_pct": d.get("changesPercentage", 0),
-                "prev_close": d.get("previousClose", 0),
-            }
+
+    # Try FMP v3 quote endpoint for commodities
+    commodity_map = {
+        "GCUSD": "XAUUSD",
+        "SIUSD": "XAGUSD",
+        "CLUSD": "USOIL",
+        "GC=F":  "XAUUSD",
+        "SI=F":  "XAGUSD",
+        "CL=F":  "USOIL",
+    }
+    for fmp_sym, h2_name in commodity_map.items():
+        if h2_name in results:
+            continue
+        try:
+            r = requests.get(
+                f"https://financialmodelingprep.com/api/v3/quote/{fmp_sym}",
+                params={"apikey": FMP_KEY},
+                timeout=8
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data and len(data) > 0:
+                    d = data[0]
+                    results[h2_name] = {
+                        "price":      d.get("price", 0),
+                        "change_pct": d.get("changesPercentage", 0),
+                        "prev_close": d.get("previousClose", 0),
+                    }
+                    print(f"[COMMODITY] {h2_name}: {results[h2_name]['price']}")
+        except Exception as e:
+            print(f"[COMMODITY] {fmp_sym}: {e}")
+
     return results
 
 def fetch_macro_indicators() -> Dict:
