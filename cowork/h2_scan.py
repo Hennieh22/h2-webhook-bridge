@@ -108,12 +108,30 @@ def fetch_prices() -> Dict:
                 timeout=8)
             if r.status_code == 200:
                 data = r.json()
-                price_val = data.get("price", data.get("Price", 0))
-                if price_val and float(price_val) > 0:
-                    prices[h2_name] = round(float(price_val), 2)
+                price_val = float(data.get("price", data.get("Price", 0)))
+                if price_val > 0:
+                    # XAG sanity check — silver should be $25-50/oz
+                    # If > 100, likely returned in wrong unit — divide by 32.15 (oz per kg)
+                    if h2_name == "XAGUSD" and price_val > 100:
+                        price_val = round(price_val / 32.15, 4)
+                        print(f"[METALS] XAG unit correction applied: {price_val}")
+                    prices[h2_name] = round(price_val, 2)
                     print(f"[METALS] gold-api.com {h2_name}: {prices[h2_name]}")
     except Exception as e:
         print(f"[METALS] gold-api.com: {e}")
+
+    # If XAG still wrong after correction, try silver endpoint
+    if prices.get("XAGUSD", 0) > 100 or prices.get("XAGUSD", 0) == 0:
+        try:
+            r = requests.get("https://api.gold-api.com/price/silver", timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                price_val = float(data.get("price", 0))
+                if 20 < price_val < 100:
+                    prices["XAGUSD"] = round(price_val, 4)
+                    print(f"[METALS] gold-api silver endpoint: {prices['XAGUSD']}")
+        except:
+            pass
 
     # Fallback: FMP direct quote
     if "XAUUSD" not in prices and FMP_KEY:
