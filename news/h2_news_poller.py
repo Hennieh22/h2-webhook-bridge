@@ -31,6 +31,12 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 try:
+    import requests as _requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+try:
     import feedparser
     HAS_FEEDPARSER = True
 except ImportError:
@@ -102,42 +108,47 @@ def _fetch_json(url: str, timeout: int = 10) -> list | dict | None:
         return None
 
 
-# ── Source 1: FMP treasury rates ──────────────────────────────────────────────
+# ── Source 1: US Treasury fiscaldata.gov (free, no API key) ──────────────────
 def fetch_treasury_rates() -> dict:
-    """Pull latest treasury rates from FMP. Returns parsed dict."""
-    if not FMP_KEY:
-        log.warning("FMP_API_KEY not set — skipping treasury rates")
-        return {}
-    url = f"https://financialmodelingprep.com/api/v4/treasury?apikey={FMP_KEY}"
-    log.info("[FMP] Fetching treasury rates with key: %s...", FMP_KEY[:8])
-    log.info("[FMP] URL: %s", url.replace(FMP_KEY, FMP_KEY[:8] + "****"))
-    raw = _fetch(url)
-    log.info("[FMP] Raw response (first 300 chars): %s", (raw or "")[:300])
-    if raw is None:
-        log.warning("[FMP] No response from treasury endpoint")
+    """Fetch US Treasury rates from fiscaldata.treasury.gov — free, no API key."""
+    if not HAS_REQUESTS:
+        log.warning("[TREASURY] requests library not available")
         return {}
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.warning("[FMP] JSON parse error: %s", e)
+        url = (
+            "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
+            "/v2/accounting/od/avg_interest_rates"
+            "?fields=record_date,security_desc,avg_interest_rate_amt"
+            "&filter=security_type_desc:eq:Marketable"
+            "&sort=-record_date&limit=20"
+        )
+        log.info("[TREASURY] Fetching from fiscaldata.treasury.gov...")
+        r = _requests.get(url, timeout=10)
+        log.info("[TREASURY] Status: %s", r.status_code)
+        if r.status_code != 200:
+            log.warning("[TREASURY] Non-200 response: %s", r.text[:200])
+            return {}
+        rates_data = r.json().get("data", [])
+        log.info("[TREASURY] Records returned: %d", len(rates_data))
+        if not rates_data:
+            return {}
+
+        us10y = next((float(x["avg_interest_rate_amt"]) for x in rates_data
+                      if "Note" in x.get("security_desc", "")), None)
+        us2y  = next((float(x["avg_interest_rate_amt"]) for x in rates_data
+                      if "Bill" in x.get("security_desc", "")), None)
+
+        log.info("[TREASURY] us10y=%s us2y=%s", us10y, us2y)
+        return {
+            "us10y":       us10y,
+            "us2y":        us2y,
+            "yield_curve": "INVERTED" if (us2y and us10y and us2y > us10y) else "NORMAL",
+            "source":      "US Treasury fiscaldata.gov",
+            "record_date": rates_data[0]["record_date"] if rates_data else None,
+        }
+    except Exception as e:
+        log.error("[TREASURY] Error: %s", e)
         return {}
-    log.info("[FMP] Parsed type=%s len=%s", type(data).__name__, len(data) if isinstance(data, (list, dict)) else "n/a")
-    if not data or not isinstance(data, list):
-        log.warning("[FMP] Unexpected data shape: %s", str(data)[:200])
-        return {}
-    # Most recent entry is first
-    latest = data[0] if data else {}
-    return {
-        "us1m":  latest.get("month1"),
-        "us3m":  latest.get("month3"),
-        "us6m":  latest.get("month6"),
-        "us1y":  latest.get("year1"),
-        "us2y":  latest.get("year2"),
-        "us5y":  latest.get("year5"),
-        "us10y": latest.get("year10"),
-        "us30y": latest.get("year30"),
-        "date":  latest.get("date"),
-    }
 
 
 def compute_treasury_summary(rates: dict) -> dict:
@@ -145,8 +156,11 @@ def compute_treasury_summary(rates: dict) -> dict:
     us2y  = rates.get("us2y")
     us10y = rates.get("us10y")
 
-    # Yield curve
-    if us2y is not None and us10y is not None:
+    # Yield curve — use pre-computed value if available, otherwise derive
+    if rates.get("yield_curve") and rates["yield_curve"] != "UNKNOWN":
+        yield_curve = rates["yield_curve"]
+        spread = round(us10y - us2y, 3) if (us10y is not None and us2y is not None) else None
+    elif us2y is not None and us10y is not None:
         spread = round(us10y - us2y, 3)
         yield_curve = "NORMAL" if spread > 0.1 else "FLAT" if spread > -0.1 else "INVERTED"
     else:
@@ -157,14 +171,13 @@ def compute_treasury_summary(rates: dict) -> dict:
     trend = _compute_trend(us10y)
 
     return {
-        "us10y":       us10y,
-        "us2y":        us2y,
-        "us5y":        rates.get("us5y"),
-        "us30y":       rates.get("us30y"),
+        "us10y":        us10y,
+        "us2y":         us2y,
         "spread_2s10s": spread,
-        "yield_curve": yield_curve,
-        "trend_3day":  trend,
-        "as_of":       rates.get("date"),
+        "yield_curve":  yield_curve,
+        "trend_3day":   trend,
+        "source":       rates.get("source", "unknown"),
+        "as_of":        rates.get("record_date") or rates.get("date"),
     }
 
 
