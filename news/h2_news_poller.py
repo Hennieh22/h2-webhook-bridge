@@ -109,8 +109,21 @@ def fetch_treasury_rates() -> dict:
         log.warning("FMP_API_KEY not set — skipping treasury rates")
         return {}
     url = f"https://financialmodelingprep.com/api/v4/treasury?apikey={FMP_KEY}"
-    data = _fetch_json(url)
+    log.info("[FMP] Fetching treasury rates with key: %s...", FMP_KEY[:8])
+    log.info("[FMP] URL: %s", url.replace(FMP_KEY, FMP_KEY[:8] + "****"))
+    raw = _fetch(url)
+    log.info("[FMP] Raw response (first 300 chars): %s", (raw or "")[:300])
+    if raw is None:
+        log.warning("[FMP] No response from treasury endpoint")
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.warning("[FMP] JSON parse error: %s", e)
+        return {}
+    log.info("[FMP] Parsed type=%s len=%s", type(data).__name__, len(data) if isinstance(data, (list, dict)) else "n/a")
     if not data or not isinstance(data, list):
+        log.warning("[FMP] Unexpected data shape: %s", str(data)[:200])
         return {}
     # Most recent entry is first
     latest = data[0] if data else {}
