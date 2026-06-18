@@ -458,5 +458,7 @@ def main() -> None:
         time.sleep(POLL_INTERVAL)
 
 
+run_poller = main  # alias used by Flask background thread launcher
+
 if __name__ == "__main__":
     main()

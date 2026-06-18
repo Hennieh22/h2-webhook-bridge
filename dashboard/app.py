@@ -23,6 +23,8 @@ No external dependencies beyond Flask.
 
 import json
 import os
+import sys
+import threading
 import urllib.request
 from pathlib import Path
 from flask import Flask, jsonify, send_from_directory, Response
@@ -182,6 +184,28 @@ def news_status():
 @app.route("/")
 def dashboard():
     return send_from_directory(str(DASHBOARD), "h2_dashboard.html")
+
+
+# ── News poller background thread ────────────────────────────────────────────
+def start_news_poller_thread():
+    """Run h2_news_poller as a background daemon thread inside gunicorn."""
+    try:
+        poller_path = os.path.join(os.path.dirname(__file__), '..', 'news', 'h2_news_poller.py')
+        poller_path = os.path.abspath(poller_path)
+        if not os.path.exists(poller_path):
+            print(f"[NEWS] Poller not found at {poller_path} — skipping")
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("h2_news_poller", poller_path)
+        poller = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(poller)
+        print("[NEWS] Starting news poller background thread...")
+        poller.run_poller()
+    except Exception as e:
+        print(f"[NEWS] Poller thread error: {e}")
+
+_poller_thread = threading.Thread(target=start_news_poller_thread, daemon=True)
+_poller_thread.start()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
