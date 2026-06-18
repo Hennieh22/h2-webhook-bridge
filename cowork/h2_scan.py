@@ -100,23 +100,22 @@ def fetch_prices() -> Dict:
         except Exception as e:
             print(f"[PRICES] frankfurter: {e}")
 
-    # Metals via metals.live (free, no key)
+    # Metals: gold-api.com (free, no key required)
     try:
-        r = requests.get("https://metals.live/api/v1/spot", timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            for item in data:
-                sym = item.get("symbol", "").upper()
-                price_val = item.get("price", 0)
-                if sym == "XAU":
-                    prices["XAUUSD"] = round(float(price_val), 2)
-                elif sym == "XAG":
-                    prices["XAGUSD"] = round(float(price_val), 4)
-            print(f"[METALS] metals.live: XAUUSD={prices.get('XAUUSD','–')} XAGUSD={prices.get('XAGUSD','–')}")
+        for symbol, h2_name in [("XAU", "XAUUSD"), ("XAG", "XAGUSD")]:
+            r = requests.get(
+                f"https://api.gold-api.com/price/{symbol}",
+                timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                price_val = data.get("price", data.get("Price", 0))
+                if price_val and float(price_val) > 0:
+                    prices[h2_name] = round(float(price_val), 2)
+                    print(f"[METALS] gold-api.com {h2_name}: {prices[h2_name]}")
     except Exception as e:
-        print(f"[METALS] metals.live: {e}")
+        print(f"[METALS] gold-api.com: {e}")
 
-    # Fallback: FMP with XAUUSD/XAGUSD symbol format
+    # Fallback: FMP direct quote
     if "XAUUSD" not in prices and FMP_KEY:
         for fmp_sym, h2_name in [("XAUUSD", "XAUUSD"), ("XAGUSD", "XAGUSD")]:
             try:
@@ -131,13 +130,13 @@ def fetch_prices() -> Dict:
             except Exception as e:
                 print(f"[METALS] FMP {fmp_sym}: {e}")
 
-    # Final fallback: approximate prices (ATR only — flagged)
+    # Final fallback with flag
     if "XAUUSD" not in prices:
         prices["XAUUSD"] = 4300.0
-        print("[METALS] Using XAUUSD fallback price 4300")
+        prices["_xau_fallback"] = True
     if "XAGUSD" not in prices:
         prices["XAGUSD"] = 32.50
-        print("[METALS] Using XAGUSD fallback price 32.50")
+        prices["_xag_fallback"] = True
 
     return prices
 
@@ -352,9 +351,16 @@ def run_scan(verbose: bool = True):
             ev_d1     = round(rates["d1"] * d1_dist_r, 2)
             ev_d1d2   = round(ev_d1 + rates["d1"]*rates["d2"]*d2_dist_r, 2)
 
+        price_flag = ""
+        if instr == "XAUUSD" and prices.get("_xau_fallback"):
+            price_flag = "*"
+        elif instr == "XAGUSD" and prices.get("_xag_fallback"):
+            price_flag = "*"
+
         row = {
             "instr":      instr,
             "price":      price,
+            "price_flag": price_flag,
             "d1_dir":     d1_dir,
             "d1_dest":    d1_dest,
             "d1_dist_r":  d1_dist_r,
@@ -409,8 +415,10 @@ def display_scan(results: List[Dict], session: str):
         if len(d1_str) > 18:
             d1_str = d1_str[:17] + "~"
 
+        price_str = f"{r['price']:,.2f}{r.get('price_flag','')}"
+
         print(f"  {r['instr']:<8} "
-              f"{r['price']:>10,.2f} "
+              f"{price_str:>11} "
               f"{d1_str:>18} "
               f"{r['d1_dist_r']:>4.1f}R "
               f"{r['hit_rate']:>5} "
@@ -424,7 +432,7 @@ def display_scan(results: List[Dict], session: str):
     print(f"  Active in session: {active_count} | Session: {session}")
     if best_instr:
         print(f"  Best EV: {best_instr} -> {best_ev:.2f}R (D1+D2 combined)")
-    print(f"  ATR = estimated destinations. LVE = live state from TradingView.")
+    print(f"  ATR = estimated destinations. LVE = live state from TradingView. * = fallback price.")
     print("="*w)
 
     active_rows = [r for r in results if r["in_session"] and r["news"] == "CLEAR"][:3]
