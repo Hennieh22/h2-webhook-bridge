@@ -18,7 +18,43 @@ NEWS_STATE  = Path(__file__).parent.parent / "outputs" / "H2_news_status.json"
 app = Flask(__name__, static_folder=str(DASHBOARD))
 
 
-# -- ngrok tunnel URL helper --------------------------------------------------
+# ---------------------------------------------------------------------------
+# H2 Live State — file-based persistence
+# ---------------------------------------------------------------------------
+# Stored at /tmp/h2_live_state.json (Railway ephemeral disk).
+# SURVIVES:  dyno sleep/wake cycles, process restarts.
+# WIPED BY:  fresh Railway deploy (new container).
+# Acceptable: TradingView alerts refresh every bar close (≤15 min staleness).
+# ---------------------------------------------------------------------------
+_LIVE_FILE = Path("/tmp/h2_live_state.json")
+_LAST_RAW  = {"body": None, "parsed": None, "symbol": None,
+               "error": None, "received_at": None}
+
+
+def _ls_load() -> dict:
+    """Read live state from disk. Returns {} if file missing or corrupt."""
+    try:
+        if _LIVE_FILE.exists():
+            with open(_LIVE_FILE) as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[LIVE_STATE] Load error: {e}")
+    return {}
+
+
+def _ls_save(state: dict):
+    """Write live state to disk."""
+    try:
+        _LIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_LIVE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"[LIVE_STATE] Save error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# ngrok helper
+# ---------------------------------------------------------------------------
 def _get_ngrok_url() -> str | None:
     try:
         with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
@@ -34,14 +70,16 @@ def _get_ngrok_url() -> str | None:
     return None
 
 
-# -- Health check -------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "service": "H2 Dashboard",
                     "ngrok_url": _get_ngrok_url() or "not running"})
 
 
-# -- ngrok URL endpoint -------------------------------------------------------
 @app.route("/ngrok-url")
 def ngrok_url_endpoint():
     url = _get_ngrok_url()
@@ -50,7 +88,6 @@ def ngrok_url_endpoint():
     return Response("ngrok not running", mimetype="text/plain", status=503)
 
 
-# -- Live state JSON endpoint -------------------------------------------------
 @app.route("/api/live-state")
 def live_state():
     if not LIVE_STATE.exists():
@@ -66,7 +103,6 @@ def live_state():
         return jsonify({"error": str(e)}), 500
 
 
-# -- Per-instrument endpoint --------------------------------------------------
 @app.route("/api/live-state/<instrument>")
 def live_state_instrument(instrument: str):
     instrument = instrument.upper()
@@ -109,12 +145,13 @@ def live_state_instrument_options(instrument: str):
     return resp
 
 
-# -- News debug endpoint ------------------------------------------------------
 @app.route("/news/debug")
 def news_debug():
-    poller_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../news/h2_news_poller.py'))
-    outputs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../outputs'))
-    news_file   = os.path.join(outputs_dir, 'H2_news_status.json')
+    poller_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '../news/h2_news_poller.py'))
+    outputs_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '../outputs'))
+    news_file = os.path.join(outputs_dir, 'H2_news_status.json')
     return jsonify({
         "poller_file_exists": os.path.exists(poller_path),
         "outputs_dir_exists": os.path.exists(outputs_dir),
@@ -124,7 +161,6 @@ def news_debug():
     })
 
 
-# -- News status endpoint -----------------------------------------------------
 @app.route("/news/status")
 def news_status():
     if not NEWS_STATE.exists():
@@ -140,13 +176,113 @@ def news_status():
         return jsonify({"error": str(e)}), 500
 
 
-# -- Dashboard HTML -----------------------------------------------------------
 @app.route("/")
 def dashboard():
     return send_from_directory(str(DASHBOARD), "h2_dashboard.html")
 
 
-# -- News poller background thread --------------------------------------------
+# ---------------------------------------------------------------------------
+# Live State endpoints — file-backed, survives dyno restarts
+# ---------------------------------------------------------------------------
+
+@app.route("/live_state", methods=["POST"])
+def post_live_state():
+    raw_body = request.get_data(as_text=True)
+    print(f"[LIVE_STATE] POST raw: {raw_body[:500]}")
+
+    _LAST_RAW["body"]        = raw_body[:2000]
+    _LAST_RAW["received_at"] = int(_time.time())
+    _LAST_RAW["error"]       = None
+    _LAST_RAW["symbol"]      = None
+
+    try:
+        raw_data = json.loads(raw_body) if raw_body else None
+        if not raw_data:
+            _LAST_RAW["error"] = "empty body"
+            return jsonify({"error": "empty body"}), 400
+
+        _LAST_RAW["parsed"] = raw_data
+
+        # Handle TradingView {{message}} wrapper if present:
+        # {"message": "{\"type\":\"live_state\",...}"} -> unwrap inner JSON
+        data = raw_data
+        if "symbol" not in raw_data and "message" in raw_data:
+            print("[LIVE_STATE] Unwrapping TV message field")
+            try:
+                data = json.loads(raw_data["message"])
+            except Exception as e:
+                _LAST_RAW["error"] = f"unwrap failed: {e}"
+                return jsonify({"error": "could not parse nested message",
+                                "raw": raw_body[:500]}), 400
+
+        symbol = data.get("symbol", "").upper()
+        # Strip broker prefix e.g. "ICMARKETS:JP225" -> "JP225"
+        if ":" in symbol:
+            symbol = symbol.split(":")[-1]
+
+        _LAST_RAW["symbol"] = symbol
+
+        if not symbol:
+            _LAST_RAW["error"] = "missing symbol"
+            return jsonify({"error": "missing symbol",
+                            "received_keys": list(data.keys())}), 400
+
+        # Read current state from disk, update, write back
+        state = _ls_load()
+        state[symbol] = {
+            "dest_1h":       data.get("dest_1h"),
+            "dir_1h":        data.get("dir_1h"),
+            "dest_4h":       data.get("dest_4h"),
+            "dir_4h":        data.get("dir_4h"),
+            "dest_d":        data.get("dest_d"),
+            "dir_d":         data.get("dir_d"),
+            "regime":        data.get("regime"),
+            "journey_state": data.get("journey_state"),
+            "updated_at":    int(_time.time()),
+            "timestamp":     data.get("timestamp"),
+        }
+        _ls_save(state)
+
+        print(f"[LIVE_STATE] Stored {symbol} | "
+              f"dest_1h={data.get('dest_1h')} dir_1h={data.get('dir_1h')} | "
+              f"file={_LIVE_FILE}")
+        return jsonify({"ok": True, "symbol": symbol}), 200
+
+    except Exception as e:
+        _LAST_RAW["error"] = str(e)
+        print(f"[LIVE_STATE] Exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/live_state", methods=["GET"])
+def get_live_state():
+    """Read from disk every time — survives dyno sleep/restart."""
+    state  = _ls_load()
+    cutoff = int(_time.time()) - 14400  # 4-hour freshness window
+    fresh  = {k: v for k, v in state.items()
+              if v.get("updated_at", 0) > cutoff}
+    return jsonify(fresh), 200
+
+
+@app.route("/live_state/debug", methods=["GET"])
+def debug_live_state():
+    """Diagnostic: shows last raw POST body and full stored state."""
+    state  = _ls_load()
+    cutoff = int(_time.time()) - 14400
+    return jsonify({
+        "last_post":      _LAST_RAW,
+        "stored_keys":    list(state.keys()),
+        "current_time":   int(_time.time()),
+        "cutoff":         cutoff,
+        "live_file":      str(_LIVE_FILE),
+        "file_exists":    _LIVE_FILE.exists(),
+        "all_state":      state,
+    }), 200
+
+
+# ---------------------------------------------------------------------------
+# News poller background thread
+# ---------------------------------------------------------------------------
 def start_news_poller_thread():
     try:
         poller_path = os.path.abspath(
@@ -167,127 +303,9 @@ _poller_thread = threading.Thread(target=start_news_poller_thread, daemon=True)
 _poller_thread.start()
 
 
-# -- H2 Live State bridge -----------------------------------------------------
-# Receives JSON POSTed by TradingView alert (H2_MTF_v1.pine) on every bar close.
-# Handles two payload formats:
-#   Format A (direct): {"type":"live_state","symbol":"JP225",...}
-#   Format B (TV wrapped): {"message":"{\"type\":\"live_state\",\"symbol\":\"JP225\",...}"}
-
-_live_state   = {}
-_state_file   = "/tmp/h2_live_state.json"
-_last_raw     = {"body": None, "parsed": None, "symbol": None, "error": None,
-                 "received_at": None}   # debug: last POST received
-
-
-def _ls_load():
-    global _live_state
-    try:
-        with open(_state_file) as f:
-            _live_state = json.load(f)
-    except Exception:
-        _live_state = {}
-
-
-def _ls_save():
-    try:
-        with open(_state_file, "w") as f:
-            json.dump(_live_state, f)
-    except Exception:
-        pass
-
-
-_ls_load()
-
-
-@app.route("/live_state", methods=["POST"])
-def post_live_state():
-    raw_body = request.get_data(as_text=True)
-    print(f"[LIVE_STATE] Raw body: {raw_body[:500]}")
-
-    # Track last received for debug endpoint
-    _last_raw["body"]        = raw_body[:2000]
-    _last_raw["received_at"] = int(_time.time())
-    _last_raw["error"]       = None
-    _last_raw["symbol"]      = None
-
-    try:
-        raw_data = json.loads(raw_body) if raw_body else None
-        if not raw_data:
-            _last_raw["error"] = "empty body"
-            return jsonify({"error": "empty body"}), 400
-
-        _last_raw["parsed"] = raw_data
-
-        # ── Detect TradingView's {{message}} wrapper ──────────────────────────
-        # TV may send: {"message": "{\"type\":\"live_state\",...}"}
-        # instead of the raw JSON directly as the POST body.
-        data = raw_data
-        if "symbol" not in raw_data and "message" in raw_data:
-            print(f"[LIVE_STATE] Detected TV wrapper — unwrapping 'message' field")
-            try:
-                data = json.loads(raw_data["message"])
-            except Exception as e:
-                _last_raw["error"] = f"could not parse nested message: {e}"
-                return jsonify({
-                    "error": "could not parse nested message",
-                    "raw": raw_body[:500]
-                }), 400
-
-        symbol = data.get("symbol", "").upper()
-        # Strip exchange prefix if present (e.g. "ICMARKETS:JP225" -> "JP225")
-        if ":" in symbol:
-            symbol = symbol.split(":")[-1]
-
-        _last_raw["symbol"] = symbol
-
-        if not symbol:
-            _last_raw["error"] = "missing symbol"
-            return jsonify({"error": "missing symbol", "received_keys": list(data.keys())}), 400
-
-        _live_state[symbol] = {
-            "dest_1h":       data.get("dest_1h"),
-            "dir_1h":        data.get("dir_1h"),
-            "dest_4h":       data.get("dest_4h"),
-            "dir_4h":        data.get("dir_4h"),
-            "dest_d":        data.get("dest_d"),
-            "dir_d":         data.get("dir_d"),
-            "regime":        data.get("regime"),
-            "journey_state": data.get("journey_state"),
-            "updated_at":    int(_time.time()),
-            "timestamp":     data.get("timestamp"),
-        }
-        _ls_save()
-        print(f"[LIVE_STATE] Stored {symbol}: dest_1h={data.get('dest_1h')} dir_1h={data.get('dir_1h')}")
-        return jsonify({"ok": True, "symbol": symbol}), 200
-
-    except Exception as e:
-        _last_raw["error"] = str(e)
-        print(f"[LIVE_STATE] Exception: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/live_state", methods=["GET"])
-def get_live_state():
-    cutoff = int(_time.time()) - 14400  # 4 hours
-    fresh = {k: v for k, v in _live_state.items()
-             if v.get("updated_at", 0) > cutoff}
-    return jsonify(fresh), 200
-
-
-@app.route("/live_state/debug", methods=["GET"])
-def debug_live_state():
-    """Shows the last raw POST body received — use to diagnose TV payload format."""
-    cutoff = int(_time.time()) - 14400
-    return jsonify({
-        "last_post":    _last_raw,
-        "stored_keys":  list(_live_state.keys()),
-        "current_time": int(_time.time()),
-        "cutoff":       cutoff,
-        "all_state":    _live_state,
-    }), 200
-
-
-# -- Entry point --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
     print(f"H2 Dashboard running at http://localhost:{port}")
