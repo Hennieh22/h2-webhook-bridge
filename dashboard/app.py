@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import threading
+import time as _time
 import urllib.request
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory, Response
@@ -37,20 +38,14 @@ NEWS_STATE  = Path(__file__).parent.parent / "outputs" / "H2_news_status.json"
 app = Flask(__name__, static_folder=str(DASHBOARD))
 
 
-# ── ngrok tunnel URL helper ───────────────────────────────────────────────────
+# -- ngrok tunnel URL helper --------------------------------------------------
 def _get_ngrok_url() -> str | None:
-    """
-    Query ngrok's local API to find the current public HTTPS tunnel URL.
-    Returns the URL string or None if ngrok is not running.
-    ngrok exposes its API on http://localhost:4040/api/tunnels by default.
-    """
     try:
         with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
             data = json.loads(r.read())
         for tunnel in data.get("tunnels", []):
             if tunnel.get("proto") == "https":
                 return tunnel["public_url"]
-        # Fallback: return first tunnel regardless of proto
         tunnels = data.get("tunnels", [])
         if tunnels:
             return tunnels[0]["public_url"]
@@ -59,7 +54,7 @@ def _get_ngrok_url() -> str | None:
     return None
 
 
-# ── Health check (Railway uses this) ────────────────────────────────────────
+# -- Health check (Railway uses this) ----------------------------------------
 @app.route("/health")
 def health():
     ngrok_url = _get_ngrok_url()
@@ -70,14 +65,9 @@ def health():
     })
 
 
-# ── ngrok URL endpoint — lets Pine / tv_bridge / monitor autodiscover URL ────
+# -- ngrok URL endpoint -------------------------------------------------------
 @app.route("/ngrok-url")
 def ngrok_url_endpoint():
-    """
-    Returns the current ngrok public URL as plain text.
-    Useful for scripts that need to discover the URL programmatically.
-    Also accepts ?format=json for JSON response.
-    """
     url = _get_ngrok_url()
     fmt = os.environ.get("FORMAT", "")
     if "json" in fmt or "json" in str(os.environ.get("QUERY_STRING", "")):
@@ -89,11 +79,11 @@ def ngrok_url_endpoint():
     return Response("ngrok not running", mimetype="text/plain", status=503)
 
 
-# ── Live state JSON endpoint ─────────────────────────────────────────────────
+# -- Live state JSON endpoint -------------------------------------------------
 @app.route("/api/live-state")
 def live_state():
     if not LIVE_STATE.exists():
-        return jsonify({"error": "H2_live_state.json not found — run live/monitor.py first"}), 404
+        return jsonify({"error": "H2_live_state.json not found -- run live/monitor.py first"}), 404
     try:
         with open(LIVE_STATE, encoding="utf-8") as f:
             data = json.load(f)
@@ -108,16 +98,12 @@ def live_state():
         return jsonify({"error": str(e)}), 500
 
 
-# ── Per-instrument endpoint — Pine Script data source ────────────────────────
-# GET /api/live-state/US30  →  flat JSON for one instrument
-# CORS * so Pine's request.json() can reach it from TradingView servers.
-# Structure mirrors H2_live_state.json instruments[name], with
-# generated_at_sast and session injected at top level for easy JSON pointers.
+# -- Per-instrument endpoint --------------------------------------------------
 @app.route("/api/live-state/<instrument>")
 def live_state_instrument(instrument: str):
     instrument = instrument.upper()
     if not LIVE_STATE.exists():
-        r = jsonify({"error": "H2_live_state.json not found — run live/monitor.py first"})
+        r = jsonify({"error": "H2_live_state.json not found -- run live/monitor.py first"})
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r, 404
     try:
@@ -130,7 +116,6 @@ def live_state_instrument(instrument: str):
             r.headers["Access-Control-Allow-Origin"] = "*"
             return r, 404
 
-        # Inject top-level context fields so Pine can reach them at root level
         payload = {
             "generated_at_sast": full.get("generated_at_sast", ""),
             "generated_at_utc":  full.get("generated_at_utc",  ""),
@@ -154,7 +139,7 @@ def live_state_instrument(instrument: str):
         return r, 500
 
 
-# ── CORS preflight for the per-instrument endpoint ───────────────────────────
+# -- CORS preflight -----------------------------------------------------------
 @app.route("/api/live-state/<instrument>", methods=["OPTIONS"])
 def live_state_instrument_options(instrument: str):
     resp = Response("", status=204)
@@ -164,11 +149,11 @@ def live_state_instrument_options(instrument: str):
     return resp
 
 
-# ── News debug endpoint ──────────────────────────────────────────────────────
+# -- News debug endpoint ------------------------------------------------------
 @app.route("/news/debug")
 def news_debug():
-    poller_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'news', 'h2_news_poller.py'))
-    outputs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'outputs'))
+    poller_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../news/h2_news_poller.py'))
+    outputs_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../outputs'))
     news_file   = os.path.join(outputs_dir, 'H2_news_status.json')
     return jsonify({
         "poller_file_exists": os.path.exists(poller_path),
@@ -182,11 +167,11 @@ def news_debug():
     })
 
 
-# ── News status endpoint ─────────────────────────────────────────────────────
+# -- News status endpoint -----------------------------------------------------
 @app.route("/news/status")
 def news_status():
     if not NEWS_STATE.exists():
-        return jsonify({"error": "News poller not yet run — H2_news_status.json missing"}), 404
+        return jsonify({"error": "News poller not yet run -- H2_news_status.json missing"}), 404
     try:
         with open(NEWS_STATE, encoding="utf-8") as f:
             data = json.load(f)
@@ -198,20 +183,19 @@ def news_status():
         return jsonify({"error": str(e)}), 500
 
 
-# ── Dashboard HTML ────────────────────────────────────────────────────────────
+# -- Dashboard HTML -----------------------------------------------------------
 @app.route("/")
 def dashboard():
     return send_from_directory(str(DASHBOARD), "h2_dashboard.html")
 
 
-# ── News poller background thread ────────────────────────────────────────────
+# -- News poller background thread --------------------------------------------
 def start_news_poller_thread():
-    """Run h2_news_poller as a background daemon thread inside gunicorn."""
     try:
-        poller_path = os.path.join(os.path.dirname(__file__), '..', 'news', 'h2_news_poller.py')
+        poller_path = os.path.join(os.path.dirname(__file__), '../news/h2_news_poller.py')
         poller_path = os.path.abspath(poller_path)
         if not os.path.exists(poller_path):
-            print(f"[NEWS] Poller not found at {poller_path} — skipping")
+            print(f"[NEWS] Poller not found at {poller_path} -- skipping")
             return
         import importlib.util
         spec = importlib.util.spec_from_file_location("h2_news_poller", poller_path)
@@ -226,28 +210,30 @@ _poller_thread = threading.Thread(target=start_news_poller_thread, daemon=True)
 _poller_thread.start()
 
 
-import time as _time
+# -- H2 Live State bridge -----------------------------------------------------
+# Receives JSON POSTed by TradingView alert (H2_MTF_v1.pine) on every bar close.
+# Stores VWAP destinations per instrument in memory + /tmp for persistence.
 
-# H2 Live State store
 _live_state = {}
 _state_file = "/tmp/h2_live_state.json"
 
+
 def _ls_load():
-      global _live_state
-      import json as _json
-      try:
-                with open(_state_file) as _f:
-                              _live_state = _json.load(_f)
-      except Exception:
-                _live_state = {}
+    global _live_state
+    try:
+        with open(_state_file) as f:
+            _live_state = json.load(f)
+    except Exception:
+        _live_state = {}
+
 
 def _ls_save():
-      import json as _json
-      try:
-                with open(_state_file, "w") as _f:
-                              _json.dump(_live_state, _f)
-      except Exception:
-                pass
+    try:
+        with open(_state_file, "w") as f:
+            json.dump(_live_state, f)
+    except Exception:
+        pass
+
 
 _ls_load()
 
@@ -282,79 +268,14 @@ def post_live_state():
 
 @app.route("/live_state", methods=["GET"])
 def get_live_state():
-    cutoff = int(_time.time()) - 14400  # 4 hours
+    cutoff = int(_time.time()) - 14400
     fresh = {k: v for k, v in _live_state.items()
              if v.get("updated_at", 0) > cutoff}
     return jsonify(fresh), 200
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# -- Entry point --------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
     print(f"H2 Dashboard running at http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
-
-# H2_LIVE_STATE_ROUTES_INJECTED
-
-import time as _time
-
-# ── H2 Live State store ───────────────────────────────────────────────────────
-_live_state = {}
-_state_file = "/tmp/h2_live_state.json"
-
-def _ls_load():
-    global _live_state
-    import json as _json
-    try:
-        with open(_state_file) as _f:
-            _live_state = _json.load(_f)
-    except Exception:
-        _live_state = {}
-
-def _ls_save():
-    import json as _json
-    try:
-        with open(_state_file, "w") as _f:
-            _json.dump(_live_state, _f)
-    except Exception:
-        pass
-
-_ls_load()
-
-
-@app.route("/live_state", methods=["POST"])
-def post_live_state():
-    import json as _json
-    try:
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({"error": "empty body"}), 400
-        symbol = data.get("symbol", "").upper()
-        if not symbol:
-            return jsonify({"error": "missing symbol"}), 400
-        _live_state[symbol] = {
-            "dest_1h":       data.get("dest_1h"),
-            "dir_1h":        data.get("dir_1h"),
-            "dest_4h":       data.get("dest_4h"),
-            "dir_4h":        data.get("dir_4h"),
-            "dest_d":        data.get("dest_d"),
-            "dir_d":         data.get("dir_d"),
-            "regime":        data.get("regime"),
-            "journey_state": data.get("journey_state"),
-            "updated_at":    int(_time.time()),
-            "timestamp":     data.get("timestamp"),
-        }
-        _ls_save()
-        print(f"[LIVE_STATE] Updated {symbol}")
-        return jsonify({"ok": True, "symbol": symbol}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/live_state", methods=["GET"])
-def get_live_state():
-    cutoff = int(_time.time()) - 14400  # 4 hours
-    fresh = {k: v for k, v in _live_state.items()
-             if v.get("updated_at", 0) > cutoff}
-    return jsonify(fresh), 200
-
