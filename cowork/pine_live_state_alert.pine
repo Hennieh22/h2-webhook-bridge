@@ -1,51 +1,49 @@
-// H2 Live State Alert — add this block to H2_MTF_v1.pine (Panel 4)
+// ── Live State Alert ──────────────────────────────────────────────────────────
+// Fires on every confirmed bar close. Sends current 1H/4H/Daily VWAP
+// destinations + journey state to the Railway bridge so the Python
+// scan system can read live directional targets instead of ATR estimates.
 //
-// Place at the bottom of your existing indicator script.
-// Uses the VWAP destination variables already computed by Panel 4.
-// Fires on every bar close to keep Railway live_state fresh.
+// Confirmed variable names from H2_MTF_v1.pine:
+//   dest_1, dir_1, regime_1   — 1H VWAP destination, direction (BULL/BEAR), regime
+//   dest_4, dir_4, regime_4   — 4H
+//   dest_d, dir_d, regime_d   — Daily
+//   journey_state             — integer 1-5
 //
-// Prerequisites:
-//   dest_1h, dir_1h  — your 1H VWAP destination value and direction ("UP"/"DOWN")
-//   dest_4h, dir_4h  — your 4H VWAP destination value and direction
-//   dest_d,  dir_d   — your Daily VWAP destination value and direction
-//   regime_str       — "TRENDING"/"WITHIN"/"EXPANSION" etc.
-//   journey_val      — integer journey state (1/2/3/4)
+// dir_1/dir_4/dir_d are "BULL"/"BEAR" in Pine; converted to "UP"/"DOWN" for
+// the scan system (h2_scan.py expects "UP"/"DOWN" for destination flip logic).
 //
-// If your variable names differ, adjust the references below.
-
-// ── Alert JSON payload ────────────────────────────────────────────────────────
-// Build the JSON string using str.tostring() for each value.
-// Pine does not have native JSON serialisation, so we construct it manually.
+// NOTE: Uses alert() not alertcondition().
+// alertcondition() requires a compile-time constant string — our JSON is
+// dynamically built at runtime, so alert() is required instead.
+// In TradingView: Alerts panel → Create Alert → Condition: H2 MTF v1.0
+// (the alert fires automatically on every bar close via the script itself).
+//
+// Webhook URL for all instruments:
+//   https://h2-webhook-bridge-production-872e.up.railway.app/live_state
+//
+// How to activate:
+//   1. Insert this block above the final plot(na) in H2_MTF_v1.pine
+//      (or use the complete pine/H2_MTF_v1.pine which already includes it)
+//   2. Save the script and add to chart
+//   3. In TradingView Alerts panel, create an alert:
+//        Condition  → H2 MTF v1.0 (the script itself)
+//        Webhook URL → https://h2-webhook-bridge-production-872e.up.railway.app/live_state
+//        Message    → (leave as {{strategy.order.alert_message}} or any placeholder —
+//                      the alert() call in the script overrides the message)
+//   4. Repeat for each instrument (JP225, USTEC, XAUUSD, DE40, UK100, USDJPY, XAGUSD)
 
 live_state_json = '{"type":"live_state"' +
      ',"symbol":"'       + syminfo.ticker + '"' +
-     ',"dest_1h":'       + str.tostring(dest_1h,   "#.##") +
-     ',"dir_1h":"'       + dir_1h + '"' +
-     ',"dest_4h":'       + str.tostring(dest_4h,   "#.##") +
-     ',"dir_4h":"'       + dir_4h + '"' +
-     ',"dest_d":'        + str.tostring(dest_d,    "#.##") +
-     ',"dir_d":"'        + dir_d + '"' +
-     ',"regime":"'       + regime_str + '"' +
-     ',"journey_state":' + str.tostring(journey_val) +
+     ',"dest_1h":'       + str.tostring(dest_1, "#.##") +
+     ',"dir_1h":"'       + (dir_1 == "BULL" ? "UP" : "DOWN") + '"' +
+     ',"dest_4h":'       + str.tostring(dest_4, "#.##") +
+     ',"dir_4h":"'       + (dir_4 == "BULL" ? "UP" : "DOWN") + '"' +
+     ',"dest_d":'        + str.tostring(dest_d, "#.##") +
+     ',"dir_d":"'        + (dir_d == "BULL" ? "UP" : "DOWN") + '"' +
+     ',"regime":"'       + regime_4 + '"' +
+     ',"journey_state":' + str.tostring(journey_state) +
      ',"timestamp":'     + str.tostring(math.round(time / 1000)) +
      '}'
 
-// ── Alert condition: fire on every bar close ───────────────────────────────────
-// Use alertcondition() so the user sets the webhook URL in the alert dialog.
-alertcondition(
-     barstate.isconfirmed,
-     title    = "H2 Live State — Bar Close",
-     message  = live_state_json
-)
-
-// ── How to activate ──────────────────────────────────────────────────────────
-// 1. Add this code to H2_MTF_v1.pine (Panel 4 indicator)
-// 2. On TradingView: click the bell icon on the indicator → Create alert
-// 3. Condition: "H2 Live State — Bar Close"
-// 4. Frequency: "Once per bar close"
-// 5. Alert actions → Webhook URL:
-//       https://h2-webhook-bridge-production.up.railway.app/live_state
-// 6. Save the alert on each chart/instrument you want to track
-//    (JP225, XAUUSD, etc. — one alert per chart)
-//
-// The scan will pick up live destinations within 15 minutes (next scan run).
+if barstate.isconfirmed
+    alert(live_state_json, alert.freq_once_per_bar_close)
