@@ -27,7 +27,7 @@ import sys
 import threading
 import urllib.request
 from pathlib import Path
-from flask import Flask, jsonify, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 ROOT        = Path(__file__).resolve().parent.parent
 DASHBOARD   = Path(__file__).resolve().parent
@@ -254,39 +254,39 @@ _ls_load()
 
 @app.route("/live_state", methods=["POST"])
 def post_live_state():
-      try:
-                data = request.get_json(force=True)
-                if not data:
-                              return jsonify({"error": "empty body"}), 400
-                          symbol = data.get("symbol", "").upper()
-                if not symbol:
-                              return jsonify({"error": "missing symbol"}), 400
-                          _live_state[symbol] = {
-                              "dest_1h":       data.get("dest_1h"),
-                              "dir_1h":        data.get("dir_1h"),
-                              "dest_4h":       data.get("dest_4h"),
-                              "dir_4h":        data.get("dir_4h"),
-                              "dest_d":        data.get("dest_d"),
-                              "dir_d":         data.get("dir_d"),
-                              "regime":        data.get("regime"),
-                              "journey_state": data.get("journey_state"),
-                              "updated_at":    int(_time.time()),
-                              "timestamp":     data.get("timestamp"),
-                }
-                _ls_save()
-                print(f"[LIVE_STATE] Updated {symbol}")
-                return jsonify({"ok": True, "symbol": symbol}), 200
-except Exception as e:
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({"error": "empty body"}), 400
+        symbol = data.get("symbol", "").upper()
+        if not symbol:
+            return jsonify({"error": "missing symbol"}), 400
+        _live_state[symbol] = {
+            "dest_1h":       data.get("dest_1h"),
+            "dir_1h":        data.get("dir_1h"),
+            "dest_4h":       data.get("dest_4h"),
+            "dir_4h":        data.get("dir_4h"),
+            "dest_d":        data.get("dest_d"),
+            "dir_d":         data.get("dir_d"),
+            "regime":        data.get("regime"),
+            "journey_state": data.get("journey_state"),
+            "updated_at":    int(_time.time()),
+            "timestamp":     data.get("timestamp"),
+        }
+        _ls_save()
+        print(f"[LIVE_STATE] Updated {symbol}")
+        return jsonify({"ok": True, "symbol": symbol}), 200
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/live_state", methods=["GET"])
 def get_live_state():
-      cutoff = int(_time.time()) - 14400
-      fresh = {k: v for k, v in _live_state.items()
-                            if v.get("updated_at", 0) > cutoff}
-      return jsonify(fresh), 200
-  
+    cutoff = int(_time.time()) - 14400  # 4 hours
+    fresh = {k: v for k, v in _live_state.items()
+             if v.get("updated_at", 0) > cutoff}
+    return jsonify(fresh), 200
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
