@@ -223,6 +223,7 @@ def post_live_state():
             for symbol, instr_data in data["instruments"].items():
                 symbol = symbol.upper()
                 state[symbol] = {
+                    "price":         instr_data.get("price"),
                     "dest_1h":       instr_data.get("dest_1h"),
                     "dir_1h":        instr_data.get("dir_1h"),
                     "dest_4h":       instr_data.get("dest_4h"),
