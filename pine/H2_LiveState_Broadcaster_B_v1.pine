@@ -1,0 +1,116 @@
+//@version=6
+indicator("H2 LiveState Broadcaster B v1.0", shorttitle="H2·BCAST·B", overlay=true)
+
+// ============================================================================
+// H2 LIVESTATE BROADCASTER B — Tier 2 instruments (7)
+// US30, CAC40, AUS200, HSI, NI225, EURUSD, GBPUSD
+// Same pattern as Broadcaster A — separate script purely because Pine's
+// 40-call limit can't fit all 15 instruments in one script.
+// Load on ANY single chart (can be the SAME chart as Broadcaster A —
+// both indicators can run simultaneously on one chart).
+// Create exactly ONE alert on this script (separate from Broadcaster A's alert).
+// ============================================================================
+
+f_full_state() =>
+    bool  _nd = ta.change(time("D")) != 0
+    var float _cv   = 0.0
+    var float _ctv  = 0.0
+    var float _ct2v = 0.0
+    if _nd
+        _cv   := 0.0
+        _ctv  := 0.0
+        _ct2v := 0.0
+    _cv   += volume
+    _ctv  += hlc3 * volume
+    _ct2v += hlc3 * hlc3 * volume
+    float _vwap  = _cv > 0.0 ? _ctv / _cv : hlc3
+    float _var   = _cv > 0.0 ? math.max(_ct2v / _cv - _vwap * _vwap, 0.0) : 0.0
+    float _sig   = math.sqrt(_var)
+    float _ratio = _sig > 0.0 ? math.abs(close - _vwap) / _sig : 0.0
+    bool  _within = _ratio < 2.0
+    float _dest  = _within ? (close > _vwap ? _vwap + 2.0 * _sig : _vwap - 2.0 * _sig) : _vwap
+    string _dir  = close > _vwap ? "BULL" : "BEAR"
+    string _rgm  = _within ? "WITHIN" : "BEYOND"
+    [_vwap, _sig, _dir, _rgm, _dest]
+
+f_journey(dir_d, dir_4, regime_4, regime_1, dest_4, atr4) =>
+    bool htf_agree = dir_d == dir_4
+    bool near_dest = atr4 > 0.0 and (math.abs(dest_4) / atr4) < 1.5
+    int  js = regime_4 == "WITHIN" and htf_agree and near_dest ? 1 :
+              regime_4 == "WITHIN" and htf_agree and not near_dest ? 3 :
+              regime_4 == "WITHIN" and not htf_agree ? 2 :
+              regime_4 == "BEYOND" and regime_1 == "WITHIN" ? 4 : 5
+    js
+
+// ── PULL DATA — 7 INSTRUMENTS × 3 TF = 21 CALLS ──────────────────────────────
+[u3_vwap1, u3_sig1, u3_dir1, u3_rgm1, u3_dest1] = request.security("US30",   "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[u3_vwap4, u3_sig4, u3_dir4, u3_rgm4, u3_dest4] = request.security("US30",   "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[u3_vwapd, u3_sigd, u3_dird, u3_rgmd, u3_destd] = request.security("US30",   "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[ca_vwap1, ca_sig1, ca_dir1, ca_rgm1, ca_dest1] = request.security("CAC40",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ca_vwap4, ca_sig4, ca_dir4, ca_rgm4, ca_dest4] = request.security("CAC40",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ca_vwapd, ca_sigd, ca_dird, ca_rgmd, ca_destd] = request.security("CAC40",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[as_vwap1, as_sig1, as_dir1, as_rgm1, as_dest1] = request.security("AUS200", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[as_vwap4, as_sig4, as_dir4, as_rgm4, as_dest4] = request.security("AUS200", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[as_vwapd, as_sigd, as_dird, as_rgmd, as_destd] = request.security("AUS200", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[hs_vwap1, hs_sig1, hs_dir1, hs_rgm1, hs_dest1] = request.security("HSI",    "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[hs_vwap4, hs_sig4, hs_dir4, hs_rgm4, hs_dest4] = request.security("HSI",    "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[hs_vwapd, hs_sigd, hs_dird, hs_rgmd, hs_destd] = request.security("HSI",    "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[ni_vwap1, ni_sig1, ni_dir1, ni_rgm1, ni_dest1] = request.security("NI225",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ni_vwap4, ni_sig4, ni_dir4, ni_rgm4, ni_dest4] = request.security("NI225",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ni_vwapd, ni_sigd, ni_dird, ni_rgmd, ni_destd] = request.security("NI225",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[eu_vwap1, eu_sig1, eu_dir1, eu_rgm1, eu_dest1] = request.security("EURUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[eu_vwap4, eu_sig4, eu_dir4, eu_rgm4, eu_dest4] = request.security("EURUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[eu_vwapd, eu_sigd, eu_dird, eu_rgmd, eu_destd] = request.security("EURUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[gb_vwap1, gb_sig1, gb_dir1, gb_rgm1, gb_dest1] = request.security("GBPUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[gb_vwap4, gb_sig4, gb_dir4, gb_rgm4, gb_dest4] = request.security("GBPUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[gb_vwapd, gb_sigd, gb_dird, gb_rgmd, gb_destd] = request.security("GBPUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+// ── JOURNEY STATES ─────────────────────────────────────────────────────────────
+u3_js = f_journey(u3_dird, u3_dir4, u3_rgm4, u3_rgm1, u3_dest4, u3_sig4)
+ca_js = f_journey(ca_dird, ca_dir4, ca_rgm4, ca_rgm1, ca_dest4, ca_sig4)
+as_js = f_journey(as_dird, as_dir4, as_rgm4, as_rgm1, as_dest4, as_sig4)
+hs_js = f_journey(hs_dird, hs_dir4, hs_rgm4, hs_rgm1, hs_dest4, hs_sig4)
+ni_js = f_journey(ni_dird, ni_dir4, ni_rgm4, ni_rgm1, ni_dest4, ni_sig4)
+eu_js = f_journey(eu_dird, eu_dir4, eu_rgm4, eu_rgm1, eu_dest4, eu_sig4)
+gb_js = f_journey(gb_dird, gb_dir4, gb_rgm4, gb_rgm1, gb_dest4, gb_sig4)
+
+f_instr_json(sym, dest1, dir1, dest4, dir4, destd, dird, rgm4, js) =>
+    '"' + sym + '":{' +
+    '"dest_1h":'        + str.tostring(dest1, "#.##") +
+    ',"dir_1h":"'       + (dir1 == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"dest_4h":'       + str.tostring(dest4, "#.##") +
+    ',"dir_4h":"'       + (dir4 == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"dest_d":'        + str.tostring(destd, "#.##") +
+    ',"dir_d":"'        + (dird == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"regime":"'       + rgm4 + '"' +
+    ',"journey_state":' + str.tostring(js) +
+    '}'
+
+combined_json =
+     '{"type":"live_state_batch","batch":"B","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
+     f_instr_json("US30",   u3_dest1, u3_dir1, u3_dest4, u3_dir4, u3_destd, u3_dird, u3_rgm4, u3_js) + ',' +
+     f_instr_json("CAC40",  ca_dest1, ca_dir1, ca_dest4, ca_dir4, ca_destd, ca_dird, ca_rgm4, ca_js) + ',' +
+     f_instr_json("AUS200", as_dest1, as_dir1, as_dest4, as_dir4, as_destd, as_dird, as_rgm4, as_js) + ',' +
+     f_instr_json("HSI",    hs_dest1, hs_dir1, hs_dest4, hs_dir4, hs_destd, hs_dird, hs_rgm4, hs_js) + ',' +
+     f_instr_json("NI225",  ni_dest1, ni_dir1, ni_dest4, ni_dir4, ni_destd, ni_dird, ni_rgm4, ni_js) + ',' +
+     f_instr_json("EURUSD", eu_dest1, eu_dir1, eu_dest4, eu_dir4, eu_destd, eu_dird, eu_rgm4, eu_js) + ',' +
+     f_instr_json("GBPUSD", gb_dest1, gb_dir1, gb_dest4, gb_dir4, gb_destd, gb_dird, gb_rgm4, gb_js) +
+     '}}'
+
+if barstate.isconfirmed
+    alert(combined_json, alert.freq_once_per_bar_close)
+
+var table tbl = table.new(position.bottom_right, 2, 2, border_width=1, border_color=color.new(color.gray, 60))
+if barstate.islast
+    table.cell(tbl, 0, 0, "H2 BROADCAST B", text_color=color.white, bgcolor=color.new(color.navy, 40), text_size=size.small)
+    table.cell(tbl, 1, 0, "7 instruments",  text_color=color.lime,  bgcolor=color.new(color.navy, 40), text_size=size.small)
+    table.cell(tbl, 0, 1, "Last broadcast", text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 1, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+plot(na)

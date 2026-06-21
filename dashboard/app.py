@@ -206,7 +206,7 @@ def post_live_state():
         # Handle TradingView {{message}} wrapper if present:
         # {"message": "{\"type\":\"live_state\",...}"} -> unwrap inner JSON
         data = raw_data
-        if "symbol" not in raw_data and "message" in raw_data:
+        if "instruments" not in raw_data and "symbol" not in raw_data and "message" in raw_data:
             print("[LIVE_STATE] Unwrapping TV message field")
             try:
                 data = json.loads(raw_data["message"])
@@ -215,6 +215,33 @@ def post_live_state():
                 return jsonify({"error": "could not parse nested message",
                                 "raw": raw_body[:500]}), 400
 
+        # ── Batch format — Broadcaster A or B sends multiple instruments ──────
+        if data.get("type") == "live_state_batch" and "instruments" in data:
+            state = _ls_load()
+            now   = int(_time.time())
+            updated_symbols = []
+            for symbol, instr_data in data["instruments"].items():
+                symbol = symbol.upper()
+                state[symbol] = {
+                    "dest_1h":       instr_data.get("dest_1h"),
+                    "dir_1h":        instr_data.get("dir_1h"),
+                    "dest_4h":       instr_data.get("dest_4h"),
+                    "dir_4h":        instr_data.get("dir_4h"),
+                    "dest_d":        instr_data.get("dest_d"),
+                    "dir_d":         instr_data.get("dir_d"),
+                    "regime":        instr_data.get("regime"),
+                    "journey_state": instr_data.get("journey_state"),
+                    "updated_at":    now,
+                    "timestamp":     data.get("timestamp"),
+                    "batch":         data.get("batch", "?"),
+                }
+                updated_symbols.append(symbol)
+            _ls_save(state)
+            print(f"[LIVE_STATE] Batch {data.get('batch')} stored {len(updated_symbols)} symbols: {updated_symbols}")
+            _LAST_RAW["symbol"] = ",".join(updated_symbols)
+            return jsonify({"ok": True, "batch": data.get("batch"), "symbols": updated_symbols}), 200
+
+        # ── Single-instrument format (legacy, kept for backward compatibility) ─
         symbol = data.get("symbol", "").upper()
         # Strip broker prefix e.g. "ICMARKETS:JP225" -> "JP225"
         if ":" in symbol:

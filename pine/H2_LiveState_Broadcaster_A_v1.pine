@@ -1,0 +1,120 @@
+//@version=6
+indicator("H2 LiveState Broadcaster A v1.0", shorttitle="H2·BCAST·A", overlay=true)
+
+// ============================================================================
+// H2 LIVESTATE BROADCASTER A — Tier 1 instruments (8)
+// JP225, USTEC, XAUUSD, DE40, UK100, USDJPY, XAGUSD, SPX
+// Pulls 1H/4H/Daily VWAP data via request.security(), fires ONE alert
+// per bar close with all 8 instruments in one JSON payload.
+// Load on ANY single chart. Create exactly ONE alert on this script.
+// ============================================================================
+
+f_full_state() =>
+    bool  _nd = ta.change(time("D")) != 0
+    var float _cv   = 0.0
+    var float _ctv  = 0.0
+    var float _ct2v = 0.0
+    if _nd
+        _cv   := 0.0
+        _ctv  := 0.0
+        _ct2v := 0.0
+    _cv   += volume
+    _ctv  += hlc3 * volume
+    _ct2v += hlc3 * hlc3 * volume
+    float _vwap  = _cv > 0.0 ? _ctv / _cv : hlc3
+    float _var   = _cv > 0.0 ? math.max(_ct2v / _cv - _vwap * _vwap, 0.0) : 0.0
+    float _sig   = math.sqrt(_var)
+    float _ratio = _sig > 0.0 ? math.abs(close - _vwap) / _sig : 0.0
+    bool  _within = _ratio < 2.0
+    float _dest  = _within ? (close > _vwap ? _vwap + 2.0 * _sig : _vwap - 2.0 * _sig) : _vwap
+    string _dir  = close > _vwap ? "BULL" : "BEAR"
+    string _rgm  = _within ? "WITHIN" : "BEYOND"
+    [_vwap, _sig, _dir, _rgm, _dest]
+
+f_journey(dir_d, dir_4, regime_4, regime_1, dest_4, atr4) =>
+    bool htf_agree = dir_d == dir_4
+    bool near_dest = atr4 > 0.0 and (math.abs(dest_4) / atr4) < 1.5
+    int  js = regime_4 == "WITHIN" and htf_agree and near_dest ? 1 :
+              regime_4 == "WITHIN" and htf_agree and not near_dest ? 3 :
+              regime_4 == "WITHIN" and not htf_agree ? 2 :
+              regime_4 == "BEYOND" and regime_1 == "WITHIN" ? 4 : 5
+    js
+
+// ── PULL DATA — 8 INSTRUMENTS × 3 TF = 24 CALLS ──────────────────────────────
+[jp_vwap1, jp_sig1, jp_dir1, jp_rgm1, jp_dest1] = request.security("JP225",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[jp_vwap4, jp_sig4, jp_dir4, jp_rgm4, jp_dest4] = request.security("JP225",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[jp_vwapd, jp_sigd, jp_dird, jp_rgmd, jp_destd] = request.security("JP225",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[us_vwap1, us_sig1, us_dir1, us_rgm1, us_dest1] = request.security("USTEC",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[us_vwap4, us_sig4, us_dir4, us_rgm4, us_dest4] = request.security("USTEC",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[us_vwapd, us_sigd, us_dird, us_rgmd, us_destd] = request.security("USTEC",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[xa_vwap1, xa_sig1, xa_dir1, xa_rgm1, xa_dest1] = request.security("XAUUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[xa_vwap4, xa_sig4, xa_dir4, xa_rgm4, xa_dest4] = request.security("XAUUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[xa_vwapd, xa_sigd, xa_dird, xa_rgmd, xa_destd] = request.security("XAUUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[de_vwap1, de_sig1, de_dir1, de_rgm1, de_dest1] = request.security("DE40",   "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[de_vwap4, de_sig4, de_dir4, de_rgm4, de_dest4] = request.security("DE40",   "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[de_vwapd, de_sigd, de_dird, de_rgmd, de_destd] = request.security("DE40",   "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[uk_vwap1, uk_sig1, uk_dir1, uk_rgm1, uk_dest1] = request.security("UK100",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[uk_vwap4, uk_sig4, uk_dir4, uk_rgm4, uk_dest4] = request.security("UK100",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[uk_vwapd, uk_sigd, uk_dird, uk_rgmd, uk_destd] = request.security("UK100",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[uj_vwap1, uj_sig1, uj_dir1, uj_rgm1, uj_dest1] = request.security("USDJPY", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[uj_vwap4, uj_sig4, uj_dir4, uj_rgm4, uj_dest4] = request.security("USDJPY", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[uj_vwapd, uj_sigd, uj_dird, uj_rgmd, uj_destd] = request.security("USDJPY", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[ag_vwap1, ag_sig1, ag_dir1, ag_rgm1, ag_dest1] = request.security("XAGUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ag_vwap4, ag_sig4, ag_dir4, ag_rgm4, ag_dest4] = request.security("XAGUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ag_vwapd, ag_sigd, ag_dird, ag_rgmd, ag_destd] = request.security("XAGUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+[sp_vwap1, sp_sig1, sp_dir1, sp_rgm1, sp_dest1] = request.security("SPX",    "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[sp_vwap4, sp_sig4, sp_dir4, sp_rgm4, sp_dest4] = request.security("SPX",    "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[sp_vwapd, sp_sigd, sp_dird, sp_rgmd, sp_destd] = request.security("SPX",    "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+
+// ── JOURNEY STATES ─────────────────────────────────────────────────────────────
+jp_js = f_journey(jp_dird, jp_dir4, jp_rgm4, jp_rgm1, jp_dest4, jp_sig4)
+us_js = f_journey(us_dird, us_dir4, us_rgm4, us_rgm1, us_dest4, us_sig4)
+xa_js = f_journey(xa_dird, xa_dir4, xa_rgm4, xa_rgm1, xa_dest4, xa_sig4)
+de_js = f_journey(de_dird, de_dir4, de_rgm4, de_rgm1, de_dest4, de_sig4)
+uk_js = f_journey(uk_dird, uk_dir4, uk_rgm4, uk_rgm1, uk_dest4, uk_sig4)
+uj_js = f_journey(uj_dird, uj_dir4, uj_rgm4, uj_rgm1, uj_dest4, uj_sig4)
+ag_js = f_journey(ag_dird, ag_dir4, ag_rgm4, ag_rgm1, ag_dest4, ag_sig4)
+sp_js = f_journey(sp_dird, sp_dir4, sp_rgm4, sp_rgm1, sp_dest4, sp_sig4)
+
+f_instr_json(sym, dest1, dir1, dest4, dir4, destd, dird, rgm4, js) =>
+    '"' + sym + '":{' +
+    '"dest_1h":'        + str.tostring(dest1, "#.##") +
+    ',"dir_1h":"'       + (dir1 == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"dest_4h":'       + str.tostring(dest4, "#.##") +
+    ',"dir_4h":"'       + (dir4 == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"dest_d":'        + str.tostring(destd, "#.##") +
+    ',"dir_d":"'        + (dird == "BULL" ? "UP" : "DOWN") + '"' +
+    ',"regime":"'       + rgm4 + '"' +
+    ',"journey_state":' + str.tostring(js) +
+    '}'
+
+combined_json =
+     '{"type":"live_state_batch","batch":"A","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
+     f_instr_json("JP225",  jp_dest1, jp_dir1, jp_dest4, jp_dir4, jp_destd, jp_dird, jp_rgm4, jp_js) + ',' +
+     f_instr_json("USTEC",  us_dest1, us_dir1, us_dest4, us_dir4, us_destd, us_dird, us_rgm4, us_js) + ',' +
+     f_instr_json("XAUUSD", xa_dest1, xa_dir1, xa_dest4, xa_dir4, xa_destd, xa_dird, xa_rgm4, xa_js) + ',' +
+     f_instr_json("DE40",   de_dest1, de_dir1, de_dest4, de_dir4, de_destd, de_dird, de_rgm4, de_js) + ',' +
+     f_instr_json("UK100",  uk_dest1, uk_dir1, uk_dest4, uk_dir4, uk_destd, uk_dird, uk_rgm4, uk_js) + ',' +
+     f_instr_json("USDJPY", uj_dest1, uj_dir1, uj_dest4, uj_dir4, uj_destd, uj_dird, uj_rgm4, uj_js) + ',' +
+     f_instr_json("XAGUSD", ag_dest1, ag_dir1, ag_dest4, ag_dir4, ag_destd, ag_dird, ag_rgm4, ag_js) + ',' +
+     f_instr_json("SPX",    sp_dest1, sp_dir1, sp_dest4, sp_dir4, sp_destd, sp_dird, sp_rgm4, sp_js) +
+     '}}'
+
+if barstate.isconfirmed
+    alert(combined_json, alert.freq_once_per_bar_close)
+
+var table tbl = table.new(position.top_right, 2, 2, border_width=1, border_color=color.new(color.gray, 60))
+if barstate.islast
+    table.cell(tbl, 0, 0, "H2 BROADCAST A", text_color=color.white, bgcolor=color.new(color.navy, 40), text_size=size.small)
+    table.cell(tbl, 1, 0, "8 instruments",  text_color=color.lime,  bgcolor=color.new(color.navy, 40), text_size=size.small)
+    table.cell(tbl, 0, 1, "Last broadcast", text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 1, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
+
+plot(na)
