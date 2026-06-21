@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RAILWAY_URL  = os.environ.get("RAILWAY_URL",
-    "https://h2-webhook-bridge-production.up.railway.app")
+    "https://h2-webhook-bridge-production-872e.up.railway.app")
 FMP_KEY      = os.environ.get("FMP_API_KEY", "")
 WA_PHONE     = os.environ.get("WA_PHONE",    "27614056155")
 WA_APIKEY    = os.environ.get("WA_APIKEY",   "2096445")
@@ -236,6 +236,8 @@ def build_ladder_from_live_state(instr: str, price: float,
                 state = json.load(f)
             instr_data = state.get(instr, {})
             if instr_data.get("dest_1h") and instr_data.get("dest_4h"):
+                # Use price from live state when available (broadcast includes close)
+                live_price = instr_data.get("price")
                 dests_raw = [
                     {"tf": "1H",    "dest": instr_data["dest_1h"],
                      "dir": instr_data.get("dir_1h","?")},
@@ -250,7 +252,7 @@ def build_ladder_from_live_state(instr: str, price: float,
                     d["ladder_pos"] = i + 1
                     d["dist_pts"]   = round(abs(price - d["dest"]), 2)
                     d["dist_r"]     = round(abs(price - d["dest"]) / atr, 1) if atr > 0 else 0
-                return {"source": "live_state", "dests": dests_sorted}
+                return {"source": "live_state", "dests": dests_sorted, "live_price": price}
         except:
             pass
 
@@ -354,6 +356,10 @@ def run_scan(verbose: bool = True):
 
         dests  = ladder["dests"]
         source = ladder["source"]
+        # Prefer the TradingView close price over the placeholder/external price
+        if source == "live_state" and ladder.get("live_price"):
+            price = ladder["live_price"]
+            atr   = price * cfg["atr_pct"]
         rates  = HIT_RATES.get(instr, HIT_RATES["DEFAULT"])
 
         in_session  = session_gate(instr, session)
