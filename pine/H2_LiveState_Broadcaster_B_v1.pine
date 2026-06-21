@@ -92,8 +92,7 @@ f_instr_json(sym, dest1, dir1, dest4, dir4, destd, dird, rgm4, js) =>
     ',"journey_state":' + str.tostring(js) +
     '}'
 
-combined_json =
-     '{"type":"live_state_batch","batch":"B","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
+combined_json = '{"type":"live_state_batch","batch":"B","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
      f_instr_json("US30",   u3_dest1, u3_dir1, u3_dest4, u3_dir4, u3_destd, u3_dird, u3_rgm4, u3_js) + ',' +
      f_instr_json("CAC40",  ca_dest1, ca_dir1, ca_dest4, ca_dir4, ca_destd, ca_dird, ca_rgm4, ca_js) + ',' +
      f_instr_json("AUS200", as_dest1, as_dir1, as_dest4, as_dir4, as_destd, as_dird, as_rgm4, as_js) + ',' +

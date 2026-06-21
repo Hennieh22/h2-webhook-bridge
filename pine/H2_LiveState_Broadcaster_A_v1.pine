@@ -95,8 +95,7 @@ f_instr_json(sym, dest1, dir1, dest4, dir4, destd, dird, rgm4, js) =>
     ',"journey_state":' + str.tostring(js) +
     '}'
 
-combined_json =
-     '{"type":"live_state_batch","batch":"A","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
+combined_json = '{"type":"live_state_batch","batch":"A","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
      f_instr_json("JP225",  jp_dest1, jp_dir1, jp_dest4, jp_dir4, jp_destd, jp_dird, jp_rgm4, jp_js) + ',' +
      f_instr_json("USTEC",  us_dest1, us_dir1, us_dest4, us_dir4, us_destd, us_dird, us_rgm4, us_js) + ',' +
      f_instr_json("XAUUSD", xa_dest1, xa_dir1, xa_dest4, xa_dir4, xa_destd, xa_dird, xa_rgm4, xa_js) + ',' +
