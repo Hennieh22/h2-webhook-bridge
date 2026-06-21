@@ -252,7 +252,7 @@ def build_ladder_from_live_state(instr: str, price: float,
                     d["ladder_pos"] = i + 1
                     d["dist_pts"]   = round(abs(price - d["dest"]), 2)
                     d["dist_r"]     = round(abs(price - d["dest"]) / atr, 1) if atr > 0 else 0
-                return {"source": "live_state", "dests": dests_sorted, "live_price": price}
+                return {"source": "live_state", "dests": dests_sorted, "live_price": live_price}
         except:
             pass
 
@@ -356,10 +356,16 @@ def run_scan(verbose: bool = True):
 
         dests  = ladder["dests"]
         source = ladder["source"]
-        # Prefer the TradingView close price over the placeholder/external price
+        # Prefer the TradingView close price over the placeholder/external price.
+        # Recompute atr at the live price so dist_r values are correct.
         if source == "live_state" and ladder.get("live_price"):
             price = ladder["live_price"]
             atr   = price * cfg["atr_pct"]
+            # Re-sort and recompute dist_r with correct price/atr
+            for d in dests:
+                d["dist_pts"] = round(abs(price - d["dest"]), 2)
+                d["dist_r"]   = round(d["dist_pts"] / atr, 1) if atr > 0 else 0
+            dests = sorted(dests, key=lambda x: x["dist_pts"])
         rates  = HIT_RATES.get(instr, HIT_RATES["DEFAULT"])
 
         in_session  = session_gate(instr, session)
