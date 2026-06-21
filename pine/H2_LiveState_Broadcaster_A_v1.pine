@@ -97,14 +97,24 @@ combined_json = '{"type":"live_state_batch","batch":"A","timestamp":' + str.tost
      f_instr_json("SPX",    sp_dest1, sp_dir1, sp_dest4, sp_dir4, sp_destd, sp_dird, sp_rgm4, sp_js) +
      '}}'
 
-if barstate.isconfirmed
+// Guard: all dest_1h values must be non-na before firing — na produces literal "NaN"
+// in the JSON string which TV's webhook sender silently rejects before HTTP delivery
+all_ready = not na(jp_dest1) and not na(us_dest1) and not na(xa_dest1) and
+     not na(de_dest1) and not na(uk_dest1) and not na(uj_dest1) and
+     not na(ag_dest1) and not na(sp_dest1)
+
+if barstate.isconfirmed and all_ready
     alert(combined_json, alert.freq_once_per_bar_close)
 
-var table tbl = table.new(position.top_right, 2, 2, border_width=1, border_color=color.new(color.gray, 60))
+var table tbl = table.new(position.top_right, 2, 3, border_width=1, border_color=color.new(color.gray, 60))
 if barstate.islast
     table.cell(tbl, 0, 0, "H2 BROADCAST A", text_color=color.white, bgcolor=color.new(color.navy, 40), text_size=size.small)
     table.cell(tbl, 1, 0, "8 instruments",  text_color=color.lime,  bgcolor=color.new(color.navy, 40), text_size=size.small)
-    table.cell(tbl, 0, 1, "Last broadcast", text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
-    table.cell(tbl, 1, 1, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 0, 1, "Status",         text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 1, all_ready ? "READY" : "WAITING na",
+         text_color=all_ready ? color.lime : color.orange,
+         bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 0, 2, "Last bar",       text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 2, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
 
 plot(na)

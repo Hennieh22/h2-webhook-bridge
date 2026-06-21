@@ -93,14 +93,24 @@ combined_json = '{"type":"live_state_batch","batch":"B","timestamp":' + str.tost
      f_instr_json("GBPUSD", gb_dest1, gb_dir1, gb_dest4, gb_dir4, gb_destd, gb_dird, gb_rgm4, gb_js) +
      '}}'
 
-if barstate.isconfirmed
+// Guard: all dest_1h values must be non-na before firing — na produces literal "NaN"
+// in the JSON string which TV's webhook sender silently rejects before HTTP delivery
+all_ready = not na(u3_dest1) and not na(ca_dest1) and not na(as_dest1) and
+     not na(hs_dest1) and not na(ni_dest1) and not na(eu_dest1) and
+     not na(gb_dest1)
+
+if barstate.isconfirmed and all_ready
     alert(combined_json, alert.freq_once_per_bar_close)
 
-var table tbl = table.new(position.bottom_right, 2, 2, border_width=1, border_color=color.new(color.gray, 60))
+var table tbl = table.new(position.bottom_right, 2, 3, border_width=1, border_color=color.new(color.gray, 60))
 if barstate.islast
     table.cell(tbl, 0, 0, "H2 BROADCAST B", text_color=color.white, bgcolor=color.new(color.navy, 40), text_size=size.small)
     table.cell(tbl, 1, 0, "7 instruments",  text_color=color.lime,  bgcolor=color.new(color.navy, 40), text_size=size.small)
-    table.cell(tbl, 0, 1, "Last broadcast", text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
-    table.cell(tbl, 1, 1, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 0, 1, "Status",         text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 1, all_ready ? "READY" : "WAITING na",
+         text_color=all_ready ? color.lime : color.orange,
+         bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 0, 2, "Last bar",       text_color=color.gray,  bgcolor=color.new(color.black, 70), text_size=size.small)
+    table.cell(tbl, 1, 2, str.format("{0,date,HH:mm}", time), text_color=color.aqua, bgcolor=color.new(color.black, 70), text_size=size.small)
 
 plot(na)
