@@ -109,6 +109,24 @@ f_td_edge(state) =>
     else
         "-13pp"
 
+f_narrative(j_state, td_score, dir4, dest4, runway4, weekly, scalp, intra, swing) =>
+    dir_word = dir4 == "BULL" ? "LONG" : "SHORT"
+    dest_str = str.tostring(dest4, format.mintick)
+    rwy_str  = str.tostring(runway4, "#.#")
+    td_qual  = td_score >= 2  ? "Strong mechanical tailwind (CONVERGING)." : td_score == 1 ? "Moderate tailwind." : td_score == -1 ? "Mild headwind — size down." : "Strong headwind (DIVERGING) — reduce size or wait."
+    j_action = j_state == 1 ? "Approaching destination — prepare entry." : j_state == 2 ? "Pullback in progress — wait for leg to complete." : j_state == 3 ? "Pullback complete — highest conviction re-entry." : j_state == 4 ? "Consolidating — wait for LTF break." : "No trade — transition phase."
+    wk_note  = weekly == "OPPOSING" ? "Weekly opposing — full size still valid per system rules." : weekly == "ALIGNED" ? "Weekly aligned — full size confirmed." : "Weekly neutral — reduced size (0.5x)."
+    active = ""
+    if scalp == "TRADE"
+        active := active + "Scalp "
+    if intra == "TRADE"
+        active := active + "Intraday "
+    if swing == "TRADE"
+        active := active + "Swing"
+    if active == ""
+        active := "No active horizon"
+    dir_word + " toward " + dest_str + " (" + rwy_str + "R). " + j_action + " " + td_qual + " " + wk_note + " Active: " + active + "."
+
 // ── REQUEST PER TIMEFRAME ─────────────────────────────────────────────────────
 [vwap_w, sigma_w, dir_w, regime_w, dest_w, src_w, runway_w] = request.security(syminfo.tickerid, tf_weekly, f_full_state(), lookahead=barmerge.lookahead_off)
 [vwap_d, sigma_d, dir_d, regime_d, dest_d, src_d, runway_d] = request.security(syminfo.tickerid, tf_daily,  f_full_state(), lookahead=barmerge.lookahead_off)
@@ -249,7 +267,7 @@ td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ?
 table tbl = na
 
 if barstate.islast
-    tbl := table.new(position.bottom_right, 4, 20, border_width=1, border_color=color.new(color.gray, 60))
+    tbl := table.new(position.bottom_right, 4, 21, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
     hdr = color.new(color.gray, 50)
@@ -375,6 +393,14 @@ if barstate.islast
         table.cell(tbl, 1, r+16, td_combined_label, text_color=td_combined_col,  bgcolor=color.new(td_combined_col, 75), text_size=sz)
         table.cell(tbl, 2, r+16, str.tostring(td_combined_score) + "/3 TFs", text_color=td_combined_col, bgcolor=bg, text_size=sz)
         table.cell(tbl, 3, r+16, "8-bar look",      text_color=color.gray,       bgcolor=bg, text_size=sz)
+
+        // Narrative row — synthesises all panel data into one plain-English instruction
+        narr     = f_narrative(journey_state, td_combined_score, dir_4, dest_4, runway_4, weekly_mod, scalp_rec, intraday_rec, swing_rec)
+        narr_col = td_combined_score >= 1 and journey_state <= 3 ? color.lime : td_combined_score <= -1 or journey_state == 5 ? color.red : color.yellow
+        table.cell(tbl, 0, r+17, "NARRATIVE", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+17, narr, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 3, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
 
 // ── ALERTS (only fire when show_td is enabled) ────────────────────────────────
 // Fires on confirmed bar close when 4H T-D state changes — for signal log.
