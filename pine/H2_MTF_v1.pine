@@ -31,6 +31,27 @@ show_td      = input.bool(false, "Show Time-Distance States", group=grp_td)
 td_lookback  = input.int(8, "Lookback (bars)", minval=2, maxval=20, group=grp_td)
 td_slope_thr = input.float(0.10, "Slope Threshold (ATR multiples)", minval=0.01, maxval=0.5, step=0.01, group=grp_td)
 
+// ── PROP FIRM GATE ────────────────────────────────────────────────────────────
+// Default OFF — table identical when disabled.
+grp_prop       = "Prop Firm Gate"
+show_prop      = input.bool(false, "Show Prop Firm Gate",            group=grp_prop)
+prop_acct_size = input.float(50000, "Account Size ($)",              group=grp_prop, step=1000)
+prop_daily_dd  = input.float(5.0,  "Daily Drawdown Limit (%)",      group=grp_prop, step=0.5)
+prop_max_dd    = input.float(10.0, "Max Total Drawdown (%)",         group=grp_prop, step=0.5)
+prop_risk_pct  = input.float(0.5,  "Risk Per Trade (%)",             group=grp_prop, step=0.1)
+prop_max_pos   = input.int(5,      "Max Concurrent Positions",       group=grp_prop)
+prop_max_tr    = input.int(5,      "Max Trades Per Day",             group=grp_prop)
+prop_min_audit = input.int(8,      "Min Audit Score (0-10)",         group=grp_prop)
+prop_min_js    = input.int(3,      "Min Journey State (1=State1 only, 3=States 1+3)", group=grp_prop)
+prop_min_td    = input.int(1,      "Min TD Combined Score (-3 to +3)", group=grp_prop)
+prop_news_ok   = input.bool(true,  "News Trading Allowed",           group=grp_prop)
+prop_wknd_ok   = input.bool(true,  "Weekend Holding Allowed",        group=grp_prop)
+prop_ovn_ok    = input.bool(true,  "Overnight Holding Allowed",      group=grp_prop)
+prop_dd_used   = input.float(0.0,  "Drawdown Used Today ($)",        group=grp_prop, step=10)
+prop_pos_open  = input.int(0,      "Open Positions Right Now",       group=grp_prop)
+prop_tr_today  = input.int(0,      "Trades Taken Today",             group=grp_prop)
+prop_audit_cur = input.int(8,      "Current Audit Score (from Panel 1)", group=grp_prop)
+
 // ── HELPERS ──────────────────────────────────────────────────────────────────
 f_sz(s)     => s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
 f_lstyle(s) => s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
@@ -271,11 +292,39 @@ td_combined_label = td_combined_score >= 2 ? "STRONG POSITIVE" : td_combined_sco
 
 td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ? color.aqua : td_combined_score == -1 ? color.orange : td_combined_score <= -2 ? color.red : color.gray
 
+// ── PROP FIRM GATE CHECKS ─────────────────────────────────────────────────────
+// Computed from inputs + Pine built-ins. journey_state and td_combined_score
+// are already defined above — no new security calls needed.
+prop_daily_limit = prop_acct_size * prop_daily_dd / 100
+prop_max_limit   = prop_acct_size * prop_max_dd / 100
+prop_risk_dollar = prop_acct_size * prop_risk_pct / 100
+prop_lot_size    = math.round(prop_risk_dollar / (prop_acct_size * 0.01) * 0.01, 2)
+
+prop_is_friday   = dayofweek == 6
+prop_after_hours = hour >= 20
+prop_wknd_gate   = prop_wknd_ok or not prop_is_friday
+prop_ovn_gate    = prop_ovn_ok  or not prop_after_hours
+prop_dd_gate     = prop_dd_used < prop_daily_limit
+prop_pos_gate    = prop_pos_open < prop_max_pos
+prop_tr_gate     = prop_tr_today < prop_max_tr
+prop_audit_gate  = prop_audit_cur >= prop_min_audit
+prop_js_gate     = prop_min_js == 1 ? journey_state == 1 : prop_min_js == 3 ? (journey_state == 1 or journey_state == 3) : (journey_state == 1 or journey_state == 2 or journey_state == 3)
+prop_td_gate     = not show_td or td_combined_score >= prop_min_td
+prop_news_gate   = prop_news_ok
+
+prop_all_pass    = prop_dd_gate and prop_pos_gate and prop_tr_gate and prop_audit_gate and prop_js_gate and prop_td_gate and prop_wknd_gate and prop_ovn_gate and prop_news_gate
+
+prop_fail_reason = not prop_dd_gate    ? "Daily DD " + str.tostring(math.round(prop_dd_used / prop_daily_limit * 100)) + "% used" : not prop_pos_gate  ? "Max positions reached (" + str.tostring(prop_pos_open) + "/" + str.tostring(prop_max_pos) + ")" : not prop_tr_gate   ? "Max trades today (" + str.tostring(prop_tr_today) + "/" + str.tostring(prop_max_tr) + ")" : not prop_audit_gate ? "Audit " + str.tostring(prop_audit_cur) + "/10 below min " + str.tostring(prop_min_audit) : not prop_js_gate   ? "Journey State " + str.tostring(journey_state) + " not allowed" : not prop_td_gate   ? "TD score " + str.tostring(td_combined_score) + " below min " + str.tostring(prop_min_td) : not prop_wknd_gate  ? "Friday — weekend hold disabled" : not prop_ovn_gate   ? "After hours — overnight hold disabled" : not prop_news_gate  ? "News trading restricted by firm" : "All gates pass"
+
+prop_dir_word  = dir_4 == "BULL" ? "LONG" : "SHORT"
+prop_signal    = prop_all_pass ? "TRADE " + prop_dir_word + " — $" + str.tostring(math.round(prop_risk_dollar), "#") + " risk / " + str.tostring(prop_lot_size, "#.##") + " lots" : "BLOCKED — " + prop_fail_reason
+prop_signal_col = prop_all_pass ? color.lime : color.red
+
 // ── TABLE (recreated every barstate.islast so row count is always correct) ───
 table tbl = na
 
 if barstate.islast
-    tbl := table.new(position.bottom_right, 4, 22, border_width=1, border_color=color.new(color.gray, 60))
+    tbl := table.new(position.bottom_right, 4, 28, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
     hdr = color.new(color.gray, 50)
@@ -415,6 +464,61 @@ if barstate.islast
         table.cell(tbl, 1, r+18, trigger, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
         table.cell(tbl, 2, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
         table.cell(tbl, 3, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+
+    // ── PROP FIRM GATE SECTION (rows r+19 to r+25 — blank when show_prop=false) ─
+    if show_prop
+        // Separator
+        table.cell(tbl, 0, r+19, "── PROP FIRM ──",      text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+19, "LIMIT",                 text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+19, "USED / STATE",          text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+19, "GATE",                  text_color=color.gray, bgcolor=bg, text_size=sz)
+
+        // Daily drawdown
+        dd_pct_used = prop_daily_limit > 0 ? prop_dd_used / prop_daily_limit * 100 : 0.0
+        dd_col = prop_dd_gate ? (dd_pct_used > 80 ? color.yellow : color.lime) : color.red
+        table.cell(tbl, 0, r+20, "Daily DD",              text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+20, "$" + str.tostring(math.round(prop_daily_limit), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+20, "$" + str.tostring(math.round(prop_dd_used), "#") + " used", text_color=dd_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+20, prop_dd_gate ? "PASS" : "FAIL", text_color=dd_col, bgcolor=color.new(dd_col, 80), text_size=sz)
+
+        // Positions + trades
+        pos_tr_pass = prop_pos_gate and prop_tr_gate
+        pos_tr_col  = pos_tr_pass ? color.lime : color.red
+        table.cell(tbl, 0, r+21, "Pos / Trades",          text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+21, str.tostring(prop_max_pos) + " max / " + str.tostring(prop_max_tr) + " max", text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+21, str.tostring(prop_pos_open) + " open / " + str.tostring(prop_tr_today) + " today", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+21, pos_tr_pass ? "PASS" : "FAIL", text_color=pos_tr_col, bgcolor=color.new(pos_tr_col, 80), text_size=sz)
+
+        // H2 system gates
+        h2_pass   = prop_audit_gate and prop_js_gate and prop_td_gate
+        h2_col    = h2_pass ? color.lime : color.red
+        table.cell(tbl, 0, r+22, "H2 Gates",              text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+22, "A>=" + str.tostring(prop_min_audit) + " JS<=" + str.tostring(prop_min_js) + " TD>=" + str.tostring(prop_min_td), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+22, "A:" + str.tostring(prop_audit_cur) + " JS:" + str.tostring(journey_state) + " TD:" + str.tostring(td_combined_score), text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+22, h2_pass ? "PASS" : "FAIL", text_color=h2_col, bgcolor=color.new(h2_col, 80), text_size=sz)
+
+        // Firm restrictions
+        restr_pass = prop_wknd_gate and prop_ovn_gate and prop_news_gate
+        restr_col  = restr_pass ? color.lime : color.red
+        wknd_str   = prop_wknd_ok ? "Wknd OK" : (prop_is_friday ? "FRI-WARN" : "Wknd OK")
+        ovn_str    = prop_ovn_ok  ? "Ovn OK"  : (prop_after_hours ? "AH-WARN" : "Ovn OK")
+        news_str   = prop_news_ok ? "News OK" : "News OFF"
+        table.cell(tbl, 0, r+23, "Firm Rules",            text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+23, "Wknd / Ovn / News",    text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+23, wknd_str + " " + ovn_str + " " + news_str, text_color=restr_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+23, restr_pass ? "PASS" : "FAIL", text_color=restr_col, bgcolor=color.new(restr_col, 80), text_size=sz)
+
+        // Position sizing
+        table.cell(tbl, 0, r+24, "Position Size",         text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+24, str.tostring(prop_risk_pct, "#.#") + "% = $" + str.tostring(math.round(prop_risk_dollar), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+24, str.tostring(prop_lot_size, "#.##") + " lots", text_color=color.aqua, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+24, "", bgcolor=bg, text_size=sz)
+
+        // Final prop signal — full-width visual
+        table.cell(tbl, 0, r+25, "PROP SIGNAL",           text_color=color.white, bgcolor=color.new(prop_signal_col, 70), text_size=sz)
+        table.cell(tbl, 1, r+25, prop_signal,             text_color=prop_signal_col, bgcolor=color.new(prop_signal_col, 80), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+25, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
+        table.cell(tbl, 3, r+25, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
 
 // ── ALERTS (only fire when show_td is enabled) ────────────────────────────────
 // Fires on confirmed bar close when 4H T-D state changes — for signal log.
