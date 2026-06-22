@@ -11,7 +11,7 @@ from typing import Dict, Optional
 
 FMP_KEY    = os.environ.get("FMP_API_KEY", "")
 RAILWAY_URL = os.environ.get("RAILWAY_URL",
-    "https://h2-webhook-bridge-production.up.railway.app")
+    "https://h2-webhook-bridge-production-872e.up.railway.app")
 FMP_BASE   = "https://financialmodelingprep.com/api/v3"
 
 # ── 15 Instruments with their FX/commodity drivers ───────────────────────────

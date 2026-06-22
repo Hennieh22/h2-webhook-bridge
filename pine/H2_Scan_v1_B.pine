@@ -1,0 +1,205 @@
+//@version=6
+indicator("H2 Scan v1.0 - B", shorttitle="H2·SCAN·B", overlay=true)
+
+// ============================================================================
+// H2 SCAN — Panel 5B  |  Tier 2 instruments (7)
+// US30  CAC40  AUS200  HSI  NI225  EURUSD  GBPUSD
+//
+// Companion to H2_Scan_v1_A.pine.  Load both on the same chart for the
+// full 15-instrument ranked view across two compact tables.
+// Default position: Bottom Left  (avoids overlap with Scan A at Top Right)
+//
+// Request.security budget:
+//   7 instruments × 3 TF (1H/4H/D) = 21  +  7 ATR  = 28 total  [< 40 ✓]
+// ============================================================================
+
+// ── INPUTS ───────────────────────────────────────────────────────────────────
+grp         = "Display"
+show_panel  = input.bool(true, "Show Scan Panel", group=grp)
+tbl_pos_in  = input.string("Bottom Left", "Table Position",
+    options=["Top Left","Top Center","Top Right","Middle Left","Middle Center",
+             "Middle Right","Bottom Left","Bottom Center","Bottom Right"],
+    group=grp)
+tbl_size_in = input.string("Normal", "Table Size",
+    options=["Tiny","Small","Normal","Large"], group=grp)
+
+// ── DISPLAY HELPERS ───────────────────────────────────────────────────────────
+f_sz(s) => s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+f_pos(s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        =>               position.bottom_right
+
+// All Tier 2 instruments use the default 45% hit rate
+f_hitrate(sym) => 0.45
+
+// ── ROW RENDERER  (global scope — receives tbl as parameter) ─────────────────
+f_row(tbl, row, sym, dir, target, dist_r, hit, ev, sz) =>
+    bg    = color.new(color.black, 70)
+    d_col = dir == "UP" ? color.lime : color.red
+    e_col = ev >= 1.0 ? color.lime : ev >= 0.5 ? color.yellow : color.gray
+    t_fmt = target > 10.0 ? "#.##" : "#.######"
+    table.cell(tbl, 0, row, sym,
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, row, dir,
+        text_color=d_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, row, str.tostring(target, t_fmt),
+        text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, row, str.tostring(dist_r, "#.#") + "R",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 4, row, str.tostring(hit * 100, "#") + "%",
+        text_color=color.gray, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 5, row, str.tostring(ev, "#.##") + "R",
+        text_color=e_col, bgcolor=color.new(e_col, 80), text_size=sz)
+
+// ── VWAP EXTENSION STATE ─────────────────────────────────────────────────────
+// Returns [destination, direction("UP"/"DOWN"), close]
+// Identical VWAP-sigma logic used by the Broadcaster scripts.
+f_full_state() =>
+    bool  _nd   = ta.change(time("D")) != 0
+    var float _cv   = 0.0
+    var float _ctv  = 0.0
+    var float _ct2v = 0.0
+    if _nd
+        _cv   := 0.0
+        _ctv  := 0.0
+        _ct2v := 0.0
+    _cv   += volume
+    _ctv  += hlc3 * volume
+    _ct2v += hlc3 * hlc3 * volume
+    float _vwap  = _cv > 0.0 ? _ctv  / _cv : hlc3
+    float _var   = _cv > 0.0 ? math.max(_ct2v / _cv - _vwap * _vwap, 0.0) : 0.0
+    float _sig   = math.sqrt(_var)
+    float _ratio = _sig > 0.0 ? math.abs(close - _vwap) / _sig : 0.0
+    bool  _w     = _ratio < 2.0
+    float _dest  = _w ? (close > _vwap ? _vwap + 2.0 * _sig : _vwap - 2.0 * _sig) : _vwap
+    string _dir  = close > _vwap ? "UP" : "DOWN"
+    [_dest, _dir, close]
+
+// ── NEAREST DESTINATION HELPER ────────────────────────────────────────────────
+f_nearest(price, d1, d4, dd, dir1, dir4, dird, atr) =>
+    dist1 = math.abs(price - d1)
+    dist4 = math.abs(price - d4)
+    distd = math.abs(price - dd)
+    mn    = math.min(dist1, math.min(dist4, distd))
+    nd    = mn == dist1 ? d1   : mn == dist4 ? d4   : dd
+    ndir  = mn == dist1 ? dir1 : mn == dist4 ? dir4 : dird
+    dr    = atr > 0.0 ? mn / atr : 0.0
+    [nd, ndir, dr]
+
+// ── DATA PULLS — 28 REQUEST.SECURITY CALLS ───────────────────────────────────
+// Only the 1H close is used as the reference price; 4H/D close ignored (u3_c4, u3_cd etc.)
+[u3_dest1, u3_dir1, u3_price] = request.security("US30",   "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[u3_dest4, u3_dir4, u3_c4]    = request.security("US30",   "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[u3_destd, u3_dird, u3_cd]    = request.security("US30",   "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+u3_atr = request.security("US30",   "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[ca_dest1, ca_dir1, ca_price] = request.security("CAC40",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ca_dest4, ca_dir4, ca_c4]    = request.security("CAC40",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ca_destd, ca_dird, ca_cd]    = request.security("CAC40",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+ca_atr = request.security("CAC40",  "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[as_dest1, as_dir1, as_price] = request.security("AUS200", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[as_dest4, as_dir4, as_c4]    = request.security("AUS200", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[as_destd, as_dird, as_cd]    = request.security("AUS200", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+as_atr = request.security("AUS200", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[hs_dest1, hs_dir1, hs_price] = request.security("HSI",    "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[hs_dest4, hs_dir4, hs_c4]    = request.security("HSI",    "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[hs_destd, hs_dird, hs_cd]    = request.security("HSI",    "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+hs_atr = request.security("HSI",    "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[ni_dest1, ni_dir1, ni_price] = request.security("NI225",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ni_dest4, ni_dir4, ni_c4]    = request.security("NI225",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ni_destd, ni_dird, ni_cd]    = request.security("NI225",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+ni_atr = request.security("NI225",  "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[eu_dest1, eu_dir1, eu_price] = request.security("EURUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[eu_dest4, eu_dir4, eu_c4]    = request.security("EURUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[eu_destd, eu_dird, eu_cd]    = request.security("EURUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+eu_atr = request.security("EURUSD", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[gb_dest1, gb_dir1, gb_price] = request.security("GBPUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[gb_dest4, gb_dir4, gb_c4]    = request.security("GBPUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[gb_destd, gb_dird, gb_cd]    = request.security("GBPUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+gb_atr = request.security("GBPUSD", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+// ── NEAREST DESTINATION PER INSTRUMENT ───────────────────────────────────────
+[u3_nd, u3_ndir, u3_dr] = f_nearest(u3_price, u3_dest1, u3_dest4, u3_destd, u3_dir1, u3_dir4, u3_dird, u3_atr)
+[ca_nd, ca_ndir, ca_dr] = f_nearest(ca_price, ca_dest1, ca_dest4, ca_destd, ca_dir1, ca_dir4, ca_dird, ca_atr)
+[as_nd, as_ndir, as_dr] = f_nearest(as_price, as_dest1, as_dest4, as_destd, as_dir1, as_dir4, as_dird, as_atr)
+[hs_nd, hs_ndir, hs_dr] = f_nearest(hs_price, hs_dest1, hs_dest4, hs_destd, hs_dir1, hs_dir4, hs_dird, hs_atr)
+[ni_nd, ni_ndir, ni_dr] = f_nearest(ni_price, ni_dest1, ni_dest4, ni_destd, ni_dir1, ni_dir4, ni_dird, ni_atr)
+[eu_nd, eu_ndir, eu_dr] = f_nearest(eu_price, eu_dest1, eu_dest4, eu_destd, eu_dir1, eu_dir4, eu_dird, eu_atr)
+[gb_nd, gb_ndir, gb_dr] = f_nearest(gb_price, gb_dest1, gb_dest4, gb_destd, gb_dir1, gb_dir4, gb_dird, gb_atr)
+
+// ── EV  =  hit_rate × distance_in_R ──────────────────────────────────────────
+u3_ev = f_hitrate("US30")   * u3_dr
+ca_ev = f_hitrate("CAC40")  * ca_dr
+as_ev = f_hitrate("AUS200") * as_dr
+hs_ev = f_hitrate("HSI")    * hs_dr
+ni_ev = f_hitrate("NI225")  * ni_dr
+eu_ev = f_hitrate("EURUSD") * eu_dr
+gb_ev = f_hitrate("GBPUSD") * gb_dr
+
+// ── TABLE RENDER ──────────────────────────────────────────────────────────────
+if barstate.islast and show_panel
+    tbl = table.new(f_pos(tbl_pos_in), 6, 9,
+          border_width=1, border_color=color.new(color.gray, 60))
+    sz  = f_sz(tbl_size_in)
+    hdr = color.new(color.navy, 40)
+    bg  = color.new(color.black, 70)
+
+    // Header row
+    table.cell(tbl, 0, 0, "H2 SCAN B", text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 1, 0, "DIR",        text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 2, 0, "TARGET",     text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 3, 0, "R",          text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 4, 0, "HIT%",       text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 5, 0, "EV",         text_color=color.white, bgcolor=hdr, text_size=sz)
+
+    // Build typed arrays for sort
+    names   = array.from("US30",  "CAC40", "AUS200", "HSI",    "NI225", "EURUSD", "GBPUSD")
+    dirs    = array.from(u3_ndir, ca_ndir,  as_ndir,  hs_ndir,  ni_ndir, eu_ndir,  gb_ndir)
+    targets = array.from(u3_nd,   ca_nd,    as_nd,    hs_nd,    ni_nd,   eu_nd,    gb_nd)
+    rs      = array.from(u3_dr,   ca_dr,    as_dr,    hs_dr,    ni_dr,   eu_dr,    gb_dr)
+    hits    = array.from(0.45,    0.45,     0.45,     0.45,     0.45,    0.45,     0.45)
+    evs     = array.from(u3_ev,   ca_ev,    as_ev,    hs_ev,    ni_ev,   eu_ev,    gb_ev)
+
+    // Sort by EV descending
+    idx = array.sort_indices(evs, order.descending)
+
+    for i = 0 to 6
+        j = array.get(idx, i)
+        f_row(tbl, i + 1,
+              array.get(names,   j), array.get(dirs,    j),
+              array.get(targets, j), array.get(rs,      j),
+              array.get(hits,    j), array.get(evs,     j), sz)
+
+    // Best EV summary row (row 8)
+    best_j  = array.get(idx, 0)
+    best_ev = array.get(evs, best_j)
+    best_nm = array.get(names, best_j)
+    ec      = best_ev >= 1.0 ? color.lime : best_ev >= 0.5 ? color.yellow : color.gray
+    table.cell(tbl, 0, 8, "BEST",
+        text_color=color.white, bgcolor=color.new(color.lime, 80), text_size=sz)
+    table.cell(tbl, 1, 8, best_nm,
+        text_color=color.lime,  bgcolor=color.new(color.lime, 80), text_size=sz)
+    table.cell(tbl, 2, 8, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, 8, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 4, 8, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 5, 8, str.tostring(best_ev, "#.##") + "R",
+        text_color=ec, bgcolor=color.new(ec, 80), text_size=sz)
+
+plot(na)

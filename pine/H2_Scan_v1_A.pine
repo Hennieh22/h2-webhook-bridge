@@ -1,0 +1,215 @@
+//@version=6
+indicator("H2 Scan v1.0 - A", shorttitle="H2·SCAN·A", overlay=true)
+
+// ============================================================================
+// H2 SCAN — Panel 5A  |  Tier 1 instruments (8)
+// JP225  USTEC  XAUUSD  DE40  UK100  USDJPY  XAGUSD  SPX
+//
+// Native Pine companion to h2_scan.py.  Reads same VWAP extensions,
+// applies validated hit rates, sorts by EV descending, renders on-chart.
+//
+// Request.security budget:
+//   8 instruments × 3 TF (1H/4H/D) = 24  +  8 ATR  = 32 total  [< 40 ✓]
+// ============================================================================
+
+// ── INPUTS ───────────────────────────────────────────────────────────────────
+grp         = "Display"
+show_panel  = input.bool(true, "Show Scan Panel", group=grp)
+tbl_pos_in  = input.string("Top Right", "Table Position",
+    options=["Top Left","Top Center","Top Right","Middle Left","Middle Center",
+             "Middle Right","Bottom Left","Bottom Center","Bottom Right"],
+    group=grp)
+tbl_size_in = input.string("Normal", "Table Size",
+    options=["Tiny","Small","Normal","Large"], group=grp)
+
+// ── DISPLAY HELPERS ───────────────────────────────────────────────────────────
+f_sz(s) => s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+f_pos(s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        =>               position.bottom_right
+
+// Validated hit rates from Stage 5 backtest
+f_hitrate(sym) =>
+    sym == "JP225" ? 0.60 : sym == "USTEC" ? 0.37 : 0.45
+
+// ── ROW RENDERER  (global scope — receives tbl as parameter) ─────────────────
+f_row(tbl, row, sym, dir, target, dist_r, hit, ev, sz) =>
+    bg    = color.new(color.black, 70)
+    d_col = dir == "UP" ? color.lime : color.red
+    e_col = ev >= 1.0 ? color.lime : ev >= 0.5 ? color.yellow : color.gray
+    t_fmt = target > 10.0 ? "#.##" : "#.######"
+    table.cell(tbl, 0, row, sym,
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, row, dir,
+        text_color=d_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, row, str.tostring(target, t_fmt),
+        text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, row, str.tostring(dist_r, "#.#") + "R",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 4, row, str.tostring(hit * 100, "#") + "%",
+        text_color=color.gray, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 5, row, str.tostring(ev, "#.##") + "R",
+        text_color=e_col, bgcolor=color.new(e_col, 80), text_size=sz)
+
+// ── VWAP EXTENSION STATE ─────────────────────────────────────────────────────
+// Returns [destination, direction("UP"/"DOWN"), close]
+// Identical VWAP-sigma logic used by the Broadcaster scripts.
+f_full_state() =>
+    bool  _nd   = ta.change(time("D")) != 0
+    var float _cv   = 0.0
+    var float _ctv  = 0.0
+    var float _ct2v = 0.0
+    if _nd
+        _cv   := 0.0
+        _ctv  := 0.0
+        _ct2v := 0.0
+    _cv   += volume
+    _ctv  += hlc3 * volume
+    _ct2v += hlc3 * hlc3 * volume
+    float _vwap  = _cv > 0.0 ? _ctv  / _cv : hlc3
+    float _var   = _cv > 0.0 ? math.max(_ct2v / _cv - _vwap * _vwap, 0.0) : 0.0
+    float _sig   = math.sqrt(_var)
+    float _ratio = _sig > 0.0 ? math.abs(close - _vwap) / _sig : 0.0
+    bool  _w     = _ratio < 2.0
+    float _dest  = _w ? (close > _vwap ? _vwap + 2.0 * _sig : _vwap - 2.0 * _sig) : _vwap
+    string _dir  = close > _vwap ? "UP" : "DOWN"
+    [_dest, _dir, close]
+
+// ── NEAREST DESTINATION HELPER ────────────────────────────────────────────────
+// Mirrors h2_scan.py's sorted(dests, key=lambda x: abs(x["dest"] - price))[0]
+f_nearest(price, d1, d4, dd, dir1, dir4, dird, atr) =>
+    dist1 = math.abs(price - d1)
+    dist4 = math.abs(price - d4)
+    distd = math.abs(price - dd)
+    mn    = math.min(dist1, math.min(dist4, distd))
+    nd    = mn == dist1 ? d1   : mn == dist4 ? d4   : dd
+    ndir  = mn == dist1 ? dir1 : mn == dist4 ? dir4 : dird
+    dr    = atr > 0.0 ? mn / atr : 0.0
+    [nd, ndir, dr]
+
+// ── DATA PULLS — 32 REQUEST.SECURITY CALLS ───────────────────────────────────
+// Only the 1H close is used as the reference price; 4H/D close ignored (jp_c4, jp_cd etc.)
+[jp_dest1, jp_dir1, jp_price] = request.security("JP225",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[jp_dest4, jp_dir4, jp_c4]    = request.security("JP225",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[jp_destd, jp_dird, jp_cd]    = request.security("JP225",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+jp_atr = request.security("JP225",  "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[us_dest1, us_dir1, us_price] = request.security("USTEC",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[us_dest4, us_dir4, us_c4]    = request.security("USTEC",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[us_destd, us_dird, us_cd]    = request.security("USTEC",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+us_atr = request.security("USTEC",  "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[xa_dest1, xa_dir1, xa_price] = request.security("XAUUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[xa_dest4, xa_dir4, xa_c4]    = request.security("XAUUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[xa_destd, xa_dird, xa_cd]    = request.security("XAUUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+xa_atr = request.security("XAUUSD", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[de_dest1, de_dir1, de_price] = request.security("DE40",   "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[de_dest4, de_dir4, de_c4]    = request.security("DE40",   "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[de_destd, de_dird, de_cd]    = request.security("DE40",   "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+de_atr = request.security("DE40",   "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[uk_dest1, uk_dir1, uk_price] = request.security("UK100",  "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[uk_dest4, uk_dir4, uk_c4]    = request.security("UK100",  "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[uk_destd, uk_dird, uk_cd]    = request.security("UK100",  "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+uk_atr = request.security("UK100",  "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[uj_dest1, uj_dir1, uj_price] = request.security("USDJPY", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[uj_dest4, uj_dir4, uj_c4]    = request.security("USDJPY", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[uj_destd, uj_dird, uj_cd]    = request.security("USDJPY", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+uj_atr = request.security("USDJPY", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[ag_dest1, ag_dir1, ag_price] = request.security("XAGUSD", "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[ag_dest4, ag_dir4, ag_c4]    = request.security("XAGUSD", "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[ag_destd, ag_dird, ag_cd]    = request.security("XAGUSD", "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+ag_atr = request.security("XAGUSD", "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+[sp_dest1, sp_dir1, sp_price] = request.security("SPX",    "60",  f_full_state(), lookahead=barmerge.lookahead_off)
+[sp_dest4, sp_dir4, sp_c4]    = request.security("SPX",    "240", f_full_state(), lookahead=barmerge.lookahead_off)
+[sp_destd, sp_dird, sp_cd]    = request.security("SPX",    "D",   f_full_state(), lookahead=barmerge.lookahead_off)
+sp_atr = request.security("SPX",    "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+// ── NEAREST DESTINATION PER INSTRUMENT ───────────────────────────────────────
+[jp_nd, jp_ndir, jp_dr] = f_nearest(jp_price, jp_dest1, jp_dest4, jp_destd, jp_dir1, jp_dir4, jp_dird, jp_atr)
+[us_nd, us_ndir, us_dr] = f_nearest(us_price, us_dest1, us_dest4, us_destd, us_dir1, us_dir4, us_dird, us_atr)
+[xa_nd, xa_ndir, xa_dr] = f_nearest(xa_price, xa_dest1, xa_dest4, xa_destd, xa_dir1, xa_dir4, xa_dird, xa_atr)
+[de_nd, de_ndir, de_dr] = f_nearest(de_price, de_dest1, de_dest4, de_destd, de_dir1, de_dir4, de_dird, de_atr)
+[uk_nd, uk_ndir, uk_dr] = f_nearest(uk_price, uk_dest1, uk_dest4, uk_destd, uk_dir1, uk_dir4, uk_dird, uk_atr)
+[uj_nd, uj_ndir, uj_dr] = f_nearest(uj_price, uj_dest1, uj_dest4, uj_destd, uj_dir1, uj_dir4, uj_dird, uj_atr)
+[ag_nd, ag_ndir, ag_dr] = f_nearest(ag_price, ag_dest1, ag_dest4, ag_destd, ag_dir1, ag_dir4, ag_dird, ag_atr)
+[sp_nd, sp_ndir, sp_dr] = f_nearest(sp_price, sp_dest1, sp_dest4, sp_destd, sp_dir1, sp_dir4, sp_dird, sp_atr)
+
+// ── EV  =  hit_rate × distance_in_R ──────────────────────────────────────────
+jp_ev = f_hitrate("JP225")  * jp_dr
+us_ev = f_hitrate("USTEC")  * us_dr
+xa_ev = f_hitrate("XAUUSD") * xa_dr
+de_ev = f_hitrate("DE40")   * de_dr
+uk_ev = f_hitrate("UK100")  * uk_dr
+uj_ev = f_hitrate("USDJPY") * uj_dr
+ag_ev = f_hitrate("XAGUSD") * ag_dr
+sp_ev = f_hitrate("SPX")    * sp_dr
+
+// ── TABLE RENDER ──────────────────────────────────────────────────────────────
+// Table created fresh each bar at barstate.islast so position input takes effect
+// immediately when changed in settings (var table would freeze position on load).
+if barstate.islast and show_panel
+    tbl = table.new(f_pos(tbl_pos_in), 6, 10,
+          border_width=1, border_color=color.new(color.gray, 60))
+    sz  = f_sz(tbl_size_in)
+    hdr = color.new(color.navy, 40)
+    bg  = color.new(color.black, 70)
+
+    // Header row
+    table.cell(tbl, 0, 0, "H2 SCAN A", text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 1, 0, "DIR",        text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 2, 0, "TARGET",     text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 3, 0, "R",          text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 4, 0, "HIT%",       text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 5, 0, "EV",         text_color=color.white, bgcolor=hdr, text_size=sz)
+
+    // Build typed arrays for sort
+    names   = array.from("JP225", "USTEC", "XAUUSD", "DE40", "UK100", "USDJPY", "XAGUSD", "SPX")
+    dirs    = array.from(jp_ndir, us_ndir, xa_ndir, de_ndir, uk_ndir, uj_ndir, ag_ndir, sp_ndir)
+    targets = array.from(jp_nd,   us_nd,   xa_nd,   de_nd,   uk_nd,   uj_nd,   ag_nd,   sp_nd)
+    rs      = array.from(jp_dr,   us_dr,   xa_dr,   de_dr,   uk_dr,   uj_dr,   ag_dr,   sp_dr)
+    hits    = array.from(0.60,    0.37,    0.45,    0.45,    0.45,    0.45,    0.45,    0.45)
+    evs     = array.from(jp_ev,   us_ev,   xa_ev,   de_ev,   uk_ev,   uj_ev,   ag_ev,   sp_ev)
+
+    // Sort by EV descending
+    idx = array.sort_indices(evs, order.descending)
+
+    for i = 0 to 7
+        j = array.get(idx, i)
+        f_row(tbl, i + 1,
+              array.get(names,   j), array.get(dirs,    j),
+              array.get(targets, j), array.get(rs,      j),
+              array.get(hits,    j), array.get(evs,     j), sz)
+
+    // Best EV summary row (row 9)
+    best_j  = array.get(idx, 0)
+    best_ev = array.get(evs, best_j)
+    best_nm = array.get(names, best_j)
+    ec      = best_ev >= 1.0 ? color.lime : best_ev >= 0.5 ? color.yellow : color.gray
+    table.cell(tbl, 0, 9, "BEST",
+        text_color=color.white, bgcolor=color.new(color.lime, 80), text_size=sz)
+    table.cell(tbl, 1, 9, best_nm,
+        text_color=color.lime,  bgcolor=color.new(color.lime, 80), text_size=sz)
+    table.cell(tbl, 2, 9, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, 9, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 4, 9, "",
+        text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 5, 9, str.tostring(best_ev, "#.##") + "R",
+        text_color=ec, bgcolor=color.new(ec, 80), text_size=sz)
+
+plot(na)

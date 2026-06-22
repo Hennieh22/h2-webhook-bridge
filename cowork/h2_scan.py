@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import math
+import time
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,17 +168,24 @@ def fetch_live_state() -> bool:
     """
     state_path = Path("outputs/H2_live_state.json")
     try:
-        r = requests.get(f"{RAILWAY_URL}/live_state", timeout=8)
+        r = requests.get(f"{RAILWAY_URL}/live_state", timeout=10)
         if r.status_code == 200:
             data = r.json()
             if data and isinstance(data, dict) and len(data) > 0:
                 with open(state_path, "w") as f:
                     json.dump(data, f, indent=2)
-                symbols = list(data.keys())
-                print(f"[LIVE_STATE] Fetched {len(symbols)} instruments: {symbols}")
+                print(f"[LIVE_STATE] {len(data)} instruments fetched")
                 return True
+            else:
+                # Railway returned empty — all data older than 4H cutoff.
+                # Remove stale local file so build_ladder_from_live_state
+                # doesn't use months-old prices from previous broadcaster fires.
+                if state_path.exists():
+                    state_path.unlink()
+                print("[LIVE_STATE] Railway returned empty — no fresh data")
+                return False
     except Exception as e:
-        print(f"[LIVE_STATE] {e}")
+        print(f"[LIVE_STATE] fetch failed: {e}")
     return False
 
 # ── Fetch Railway news status ─────────────────────────────────────────────────
@@ -230,20 +238,31 @@ def build_ladder_from_live_state(instr: str, price: float,
     Falls back to ATR-estimated destinations if not available.
     """
     state_path = Path("outputs/H2_live_state.json")
-    if state_path.exists():
+    file_exists = state_path.exists()
+    if instr in ("JP225", "SPX", "USTEC", "UK100"):
+        print(f"[BUILD] {instr}: file_exists={file_exists}")
+    if file_exists:
         try:
             with open(state_path) as f:
                 state = json.load(f)
             instr_data = state.get(instr, {})
+            age = time.time() - instr_data.get("updated_at", 0)
+            if instr in ("JP225", "SPX", "USTEC", "UK100"):
+                print(f"[BUILD] {instr}: keys={list(instr_data.keys()) if instr_data else 'MISSING'}, age={age:.0f}s, dest_1h={instr_data.get('dest_1h')}, dest_4h={instr_data.get('dest_4h')}")
+            # Reject stale records — same 4-hour window Railway applies on GET.
+            if age > 14400:
+                if instr in ("JP225", "SPX", "USTEC", "UK100"):
+                    print(f"[BUILD] {instr}: STALE — rejected (age={age:.0f}s > 14400)")
+                instr_data = {}
             if instr_data.get("dest_1h") and instr_data.get("dest_4h"):
-                # Use price from live state when available (broadcast includes close)
                 live_price = instr_data.get("price")
+                dest_d_val = instr_data.get("dest_d")
                 dests_raw = [
                     {"tf": "1H",    "dest": instr_data["dest_1h"],
                      "dir": instr_data.get("dir_1h","?")},
                     {"tf": "4H",    "dest": instr_data["dest_4h"],
                      "dir": instr_data.get("dir_4h","?")},
-                    {"tf": "DAILY", "dest": instr_data.get("dest_d", price),
+                    {"tf": "DAILY", "dest": dest_d_val if dest_d_val is not None else price,
                      "dir": instr_data.get("dir_d","?")},
                 ]
                 dests_sorted = sorted(dests_raw,
@@ -253,8 +272,10 @@ def build_ladder_from_live_state(instr: str, price: float,
                     d["dist_pts"]   = round(abs(price - d["dest"]), 2)
                     d["dist_r"]     = round(abs(price - d["dest"]) / atr, 1) if atr > 0 else 0
                 return {"source": "live_state", "dests": dests_sorted, "live_price": live_price}
-        except:
-            pass
+            elif instr in ("JP225", "SPX", "USTEC", "UK100"):
+                print(f"[BUILD] {instr}: dest_1h or dest_4h is falsy — falling to ATR")
+        except Exception as e:
+            print(f"[BUILD] {instr}: EXCEPTION {type(e).__name__}: {e}")
 
     # ATR-based fallback — both directions
     dests = [

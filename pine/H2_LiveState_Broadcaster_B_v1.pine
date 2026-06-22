@@ -80,7 +80,7 @@ eu_js = f_journey(eu_dird, eu_dir4, eu_rgm4, eu_rgm1, eu_dest4, eu_sig4)
 gb_js = f_journey(gb_dird, gb_dir4, gb_rgm4, gb_rgm1, gb_dest4, gb_sig4)
 
 f_instr_json(sym, px, dest1, dir1, dest4, dir4, destd, dird, rgm4, js) =>
-    '"' + sym + '":{"price":' + str.tostring(px, "#.##") + ',"dest_1h":' + str.tostring(dest1, "#.##") + ',"dir_1h":"' + (dir1 == "BULL" ? "UP" : "DOWN") + '","dest_4h":' + str.tostring(dest4, "#.##") + ',"dir_4h":"' + (dir4 == "BULL" ? "UP" : "DOWN") + '","dest_d":' + str.tostring(destd, "#.##") + ',"dir_d":"' + (dird == "BULL" ? "UP" : "DOWN") + '","regime":"' + rgm4 + '","journey_state":' + str.tostring(js) + '}'
+    '"' + sym + '":{"price":' + (na(px) ? "null" : str.tostring(px, "#.##")) + ',"dest_1h":' + str.tostring(dest1, "#.##") + ',"dir_1h":"' + (dir1 == "BULL" ? "UP" : "DOWN") + '","dest_4h":' + str.tostring(dest4, "#.##") + ',"dir_4h":"' + (dir4 == "BULL" ? "UP" : "DOWN") + '","dest_d":' + str.tostring(destd, "#.##") + ',"dir_d":"' + (dird == "BULL" ? "UP" : "DOWN") + '","regime":"' + rgm4 + '","journey_state":' + str.tostring(js) + '}'
 
 combined_json = '{"type":"live_state_batch","batch":"B","timestamp":' + str.tostring(math.round(time / 1000)) + ',"instruments":{' +
      f_instr_json("US30",   u3_close1, u3_dest1, u3_dir1, u3_dest4, u3_dir4, u3_destd, u3_dird, u3_rgm4, u3_js) + ',' +

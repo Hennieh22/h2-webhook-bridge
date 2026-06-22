@@ -6,6 +6,7 @@ Or triggered by Cowork when you type "trade"
 """
 
 import os
+import re
 import sys
 import json
 import anthropic
@@ -33,6 +34,128 @@ HIT_RATES = {
     "USTEC":  {"d1":0.374,"d2":0.345,"d3":0.030},
     "DEFAULT":{"d1":0.450,"d2":0.380,"d3":0.150},
 }
+
+def extract_news_state(brief_text: str) -> dict:
+    """
+    Parse the generated brief markdown and extract Panel 2 (H2_News_v2) values.
+
+    Strategy (most reliable → least reliable):
+    1. Structured key=value lines inside the PANEL UPDATES / Panel 2 block
+    2. Loose key: value patterns anywhere in the brief
+    3. SESSION STATE keyword in the brief header → session_risk
+    4. GEO RISK RATINGS section → geo_risk
+    5. Defaults (CLEAR / LOW / NONE) if nothing found
+    """
+    now_utc = datetime.now(timezone.utc)
+    state = {
+        "news_status":   "CLEAR",
+        "next_event":    "",
+        "mins_away":     999,
+        "event_impact":  "Low",
+        "session_risk":  "LOW",
+        "geo_risk":      "NONE",
+        "breaking_text": "",
+        "last_updated":  now_utc.strftime("%H:%M UTC"),
+        "extracted_at":  now_utc.isoformat(),
+    }
+
+    # ── 1. Isolate the Panel 2 block from PANEL UPDATES section ────────────
+    # The system prompt format:
+    #   ── PANEL UPDATES ──
+    #   Panel 2 (News): ...
+    #   Panel 3 (Verdict): ...
+    panel2_text = ""
+    panel_section = re.search(
+        r'PANEL\s+UPDATES.*?Panel\s+2[^:]*:(.*?)(?:Panel\s+3|═{5,}|$)',
+        brief_text, re.IGNORECASE | re.DOTALL
+    )
+    if panel_section:
+        panel2_text = panel_section.group(1)
+
+    # Search scope: panel2 block first, then full brief as fallback
+    search_texts = [panel2_text, brief_text] if panel2_text else [brief_text]
+
+    def find_val(patterns, texts, default=""):
+        for text in texts:
+            for pat in patterns:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip().strip("*_").strip()
+        return default
+
+    # ── 2. NEWS STATUS ──────────────────────────────────────────────────────
+    ns = find_val([
+        r'NEWS[_ ]STATUS\s*[=:]\s*(CLEAR|CAUTION|SUPPRESS)',
+        r'\bSTATUS\s*[=:]\s*(CLEAR|CAUTION|SUPPRESS)',
+        r'(CLEAR|CAUTION|SUPPRESS)\s+(?:status|risk)',
+    ], search_texts, "CLEAR").upper()
+    if ns in ("CLEAR", "CAUTION", "SUPPRESS"):
+        state["news_status"] = ns
+
+    # ── 3. SESSION RISK ─────────────────────────────────────────────────────
+    sr = find_val([
+        r'SESSION[_ ]RISK\s*[=:]\s*(LOW|MEDIUM|HIGH)',
+        r'RISK\s*[=:]\s*(LOW|MEDIUM|HIGH)',
+    ], search_texts, "").upper()
+    if sr in ("LOW", "MEDIUM", "HIGH"):
+        state["session_risk"] = sr
+    else:
+        # Infer from SESSION STATE in brief header (FLOW→LOW, TRANSITION→MEDIUM, SHOCK→HIGH)
+        ss_m = re.search(r'SESSION\s+STATE\s*[:\-]\s*(FLOW|MOMENTUM|TRANSITION|SHOCK)',
+                         brief_text[:600], re.IGNORECASE)
+        if ss_m:
+            ss = ss_m.group(1).upper()
+            state["session_risk"] = "HIGH" if ss == "SHOCK" else "MEDIUM" if ss == "TRANSITION" else "LOW"
+
+    # ── 4. GEO RISK ─────────────────────────────────────────────────────────
+    gr = find_val([
+        r'GEO[_ ]RISK\s*(?:OVERRIDE\s*)?[=:]\s*(NONE|ELEVATED|ACTIVE)',
+        r'GEO\s*[=:]\s*(NONE|ELEVATED|ACTIVE)',
+    ], search_texts, "").upper()
+    if gr in ("NONE", "ELEVATED", "ACTIVE"):
+        state["geo_risk"] = gr
+    else:
+        # Count ACTIVE/ELEVATED mentions in geo section as a fallback signal
+        geo_section = re.search(r'GEO(?:POLITICAL)?\s+(?:ASSESSMENT|RISK|RATINGS).*?(?:──|$)',
+                                brief_text, re.IGNORECASE | re.DOTALL)
+        geo_text = geo_section.group(0) if geo_section else brief_text
+        if len(re.findall(r'\bACTIVE\b', geo_text, re.IGNORECASE)) >= 2:
+            state["geo_risk"] = "ACTIVE"
+        elif len(re.findall(r'\bELEVATED\b', geo_text, re.IGNORECASE)) >= 3:
+            state["geo_risk"] = "ELEVATED"
+
+    # ── 5. NEXT EVENT ────────────────────────────────────────────────────────
+    ev = find_val([
+        r'NEXT[_ ]EVENT\s*[=:]\s*([^\n|,]{2,50}?)(?:\s*[\(\|]|\s*$)',
+        r'(?:next|upcoming)\s+event[:\s]+([^\n|,]{2,50}?)(?:\s*[\(\|]|\s*$)',
+    ], search_texts, "")
+    if ev:
+        state["next_event"] = ev.strip()[:40]
+
+    # ── 6. MINUTES AWAY ─────────────────────────────────────────────────────
+    ma = find_val([
+        r'MINUTES?[_ ]AWAY\s*[=:]\s*(\d+)',
+        r'MINS?\s*[=:]\s*(\d+)',
+    ], search_texts, "")
+    if ma and ma.isdigit():
+        state["mins_away"] = int(ma)
+
+    # ── 7. EVENT IMPACT ─────────────────────────────────────────────────────
+    ei = find_val([
+        r'(?:EVENT[_ ])?IMPACT\s*[=:]\s*(High|Medium|Low)',
+    ], search_texts, "Low")
+    if ei.capitalize() in ("High", "Medium", "Low"):
+        state["event_impact"] = ei.capitalize()
+
+    # ── 8. BREAKING NEWS ────────────────────────────────────────────────────
+    br = find_val([
+        r'BREAKING(?:[_ ](?:NEWS|TEXT))?\s*[=:]\s*([^\n]{0,80})',
+    ], search_texts, "")
+    if br and br.lower() not in ("none", "n/a", "-", ""):
+        state["breaking_text"] = br.strip()[:80]
+
+    return state
+
 
 def build_brief_payload(data: dict) -> str:
     """Convert collected data into structured JSON for Claude API"""
@@ -164,12 +287,22 @@ def save_and_display(report: str, brief_json: str):
     with open(geo_path, 'w') as f:
         json.dump(geo_state, f, indent=2)
 
+    # Extract and save Panel 2 state for h2_news_updater.py
+    news_state      = extract_news_state(report)
+    news_state_path = Path("outputs/h2_news_state.json")
+    with open(news_state_path, 'w') as f:
+        json.dump(news_state, f, indent=2)
+
     print("\n" + "="*62)
     print(report)
     print("="*62)
     print(f"\n[OK] Brief saved to: {filename}")
     print(f"[OK] Raw data saved to: {data_file}")
     print(f"[OK] Geo state updated: {geo_path}")
+    print(f"[OK] News state extracted → {news_state_path}")
+    print(f"     STATUS={news_state['news_status']}  "
+          f"SESSION_RISK={news_state['session_risk']}  "
+          f"GEO={news_state['geo_risk']}")
 
 def main():
     print("="*62)

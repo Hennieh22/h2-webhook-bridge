@@ -1,0 +1,215 @@
+//@version=6
+indicator("H2 News Monitor v2.0", shorttitle="H2·NEWS·v2", overlay=true)
+
+// ============================================================================
+// H2 NEWS MONITOR v2.0 — Panel 2
+//
+// AUTO MODE  — reads VIX, DXY, TNX, USDJPY live from TradingView data feeds.
+//              Derives SESSION STATUS automatically from 4 macro signals.
+//
+// MANUAL MODE — identical input fields to H2_News_v1.  Paste values from
+//               Railway /news/status endpoint; Railway URL shown in settings.
+//
+// GEO RISK OVERRIDE — always visible regardless of mode.
+//                     ACTIVE forces SUPPRESS no matter what the signals say.
+//
+// Request.security budget: VIX(1) + DXY(1) + TNX(1) + USDJPY(1) = 4 total
+// ============================================================================
+
+// ── MODE ─────────────────────────────────────────────────────────────────────
+grp_mode = "Mode"
+auto_mode = input.bool(true, "AUTO MODE  (uses live VIX / DXY / TNX / USDJPY)", group=grp_mode)
+
+// ── AUTO THRESHOLDS ───────────────────────────────────────────────────────────
+grp_auto = "Auto Thresholds"
+vix_caution_lvl  = input.float(20.0, "VIX → CAUTION above",        step=0.5,  group=grp_auto)
+vix_suppress_lvl = input.float(25.0, "VIX → SUPPRESS above",       step=0.5,  group=grp_auto)
+dxy_mom_thresh   = input.float(0.40, "DXY 5-day rise → CAUTION",   step=0.05, group=grp_auto)
+tnx_mom_thresh   = input.float(0.12, "TNX 5-day rise → CAUTION",   step=0.01, group=grp_auto)
+uj_mom_thresh    = input.float(0.40, "USDJPY 5H drop → CAUTION",   step=0.05, group=grp_auto)
+
+// ── MANUAL MODE INPUTS (paste from Railway /news/status) ─────────────────────
+grp_manual   = "Manual Mode — paste from Railway"
+manual_status = input.string("CLEAR", "News Status", options=["CLEAR","CAUTION","SUPPRESS"], group=grp_manual)
+next_event    = input.string("", "Next Event Title",     group=grp_manual)
+mins_away     = input.int(999, "Minutes to Next Event",  group=grp_manual)
+event_impact  = input.string("Low", "Impact", options=["High","Medium","Low"], group=grp_manual)
+breaking_text = input.string("", "Breaking News (if any)", group=grp_manual)
+session_risk  = input.string("LOW", "Session Risk", options=["LOW","MEDIUM","HIGH"], group=grp_manual)
+last_updated  = input.string("", "Last Updated UTC",     group=grp_manual)
+railway_url   = input.string("https://h2-webhook-bridge-production-872e.up.railway.app/news/status",
+    "Railway URL (copy from here to open in browser)", group=grp_manual)
+
+// ── GEO RISK OVERRIDE ────────────────────────────────────────────────────────
+grp_geo  = "Geo Risk Override"
+geo_risk = input.string("NONE", "Geo Risk", options=["NONE","ELEVATED","ACTIVE"], group=grp_geo)
+
+// ── DISPLAY ──────────────────────────────────────────────────────────────────
+grp_disp    = "Display"
+tbl_pos_in  = input.string("Bottom Left", "Table Position",
+    options=["Top Left","Top Center","Top Right","Middle Left","Middle Center",
+             "Middle Right","Bottom Left","Bottom Center","Bottom Right"], group=grp_disp)
+tbl_size_in = input.string("Normal", "Table Size",
+    options=["Tiny","Small","Normal","Large"], group=grp_disp)
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+f_sz(s) => s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+f_pos(s) =>
+    switch s
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Center" => position.middle_center
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        =>               position.bottom_right
+
+f_status_col(st) => st == "CLEAR" ? color.lime : st == "CAUTION" ? color.yellow : color.red
+
+f_sig_col(n) => n >= 2 ? color.red : n >= 1 ? color.yellow : color.lime
+
+// ── LIVE DATA — 4 REQUEST.SECURITY CALLS ─────────────────────────────────────
+// f_mom5: returns [current_close, 5-bar momentum] on the target TF
+f_mom5() => [close, close - close[5]]
+
+vix_px                    = request.security("TVC:VIX",       "D",  close,     lookahead=barmerge.lookahead_off)
+[dxy_px, dxy_mom]         = request.security("TVC:DXY",       "D",  f_mom5(),  lookahead=barmerge.lookahead_off)
+[tnx_px, tnx_mom]         = request.security("TVC:TNX",       "D",  f_mom5(),  lookahead=barmerge.lookahead_off)
+[uj_px,  uj_mom]          = request.security("FX_IDC:USDJPY", "60", f_mom5(),  lookahead=barmerge.lookahead_off)
+
+// ── AUTO SIGNAL CLASSIFICATION ────────────────────────────────────────────────
+// 0 = clear  |  1 = caution  |  2 = suppress
+vix_sig = vix_px > vix_suppress_lvl ? 2 : vix_px > vix_caution_lvl ? 1 : 0
+dxy_sig = dxy_mom > dxy_mom_thresh ? 1 : 0
+tnx_sig = tnx_mom > tnx_mom_thresh ? 1 : 0
+uj_sig  = uj_mom  < -uj_mom_thresh ? 1 : 0
+
+auto_max    = math.max(vix_sig, math.max(dxy_sig, math.max(tnx_sig, uj_sig)))
+auto_status = auto_max >= 2 ? "SUPPRESS" : auto_max >= 1 ? "CAUTION" : "CLEAR"
+
+// ── COMBINE: mode → geo override → final status ───────────────────────────────
+base_status  = auto_mode ? auto_status : manual_status
+final_status = geo_risk == "ACTIVE" ? "SUPPRESS" : geo_risk == "ELEVATED" and base_status == "CLEAR" ? "CAUTION" : base_status
+
+// ── SIGNAL LABEL HELPERS ──────────────────────────────────────────────────────
+f_vix_lbl() => vix_sig >= 2 ? "HIGH FEAR ▲" : vix_sig == 1 ? "ELEVATED ▲" : "OK"
+f_dxy_lbl() => dxy_sig >= 1 ? "RISK-OFF ▲" : "OK"
+f_tnx_lbl() => tnx_sig >= 1 ? "YIELD PRESS ▲" : "OK"
+f_uj_lbl()  => uj_sig  >= 1 ? "JPY BID ▼" : "OK"
+
+// ── TABLE — 3 cols × 10 rows ──────────────────────────────────────────────────
+if barstate.islast
+    tbl    = table.new(f_pos(tbl_pos_in), 3, 10, border_width=1, border_color=color.new(color.gray, 60))
+    sz     = f_sz(tbl_size_in)
+    bg     = color.new(color.black, 70)
+    hdr_bg = color.new(color.gray,  50)
+    sep_bg = color.new(color.gray,  80)
+    fc     = f_status_col(final_status)
+    gc     = geo_risk == "ACTIVE" ? color.red : geo_risk == "ELEVATED" ? color.yellow : color.lime
+
+    // ── Row 0 — header
+    mode_lbl = auto_mode ? "AUTO" : "MANUAL"
+    mode_col = auto_mode ? color.aqua : color.orange
+    upd_str  = auto_mode ? str.format("{0,date,HH:mm}", time) : (last_updated == "" ? "Not updated" : last_updated)
+    table.cell(tbl, 0, 0, "H2 NEWS v2.0", text_color=color.white, bgcolor=hdr_bg,  text_size=sz)
+    table.cell(tbl, 1, 0, mode_lbl,        text_color=mode_col,    bgcolor=hdr_bg,  text_size=sz)
+    table.cell(tbl, 2, 0, upd_str,         text_color=color.gray,  bgcolor=hdr_bg,  text_size=sz)
+
+    // ── Row 1 — final status
+    src_lbl = geo_risk == "ACTIVE" ? "GEO OVERRIDE" : auto_mode ? "AUTO SIGNALS" : "MANUAL"
+    table.cell(tbl, 0, 1, "SESSION STATUS", text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, 1, final_status,     text_color=fc, bgcolor=color.new(fc, 80), text_size=sz)
+    table.cell(tbl, 2, 1, src_lbl,          text_color=color.gray, bgcolor=bg, text_size=sz)
+
+    // ── Row 2 — geo risk override
+    geo_note = geo_risk == "ACTIVE" ? "→ FORCED SUPPRESS" : geo_risk == "ELEVATED" ? "→ CAUTION floor" : "No override"
+    table.cell(tbl, 0, 2, "GEO RISK",  text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, 2, geo_risk,    text_color=gc, bgcolor=color.new(gc, 85), text_size=sz)
+    table.cell(tbl, 2, 2, geo_note,    text_color=gc, bgcolor=bg, text_size=sz)
+
+    // ── Row 3 — section separator
+    sep_lbl = auto_mode ? "── LIVE SIGNALS ──" : "── SCHEDULED ──"
+    table.cell(tbl, 0, 3, sep_lbl, text_color=color.gray, bgcolor=sep_bg, text_size=sz)
+    table.cell(tbl, 1, 3, "",      text_color=color.gray, bgcolor=sep_bg, text_size=sz)
+    table.cell(tbl, 2, 3, "",      text_color=color.gray, bgcolor=sep_bg, text_size=sz)
+
+    // ── Rows 4-8 — mode-specific content ─────────────────────────────────────
+    if auto_mode
+        // Row 4 — VIX
+        vc = f_sig_col(vix_sig)
+        table.cell(tbl, 0, 4, "VIX",              text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 4, str.tostring(vix_px, "#.#"), text_color=vc,   bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 4, f_vix_lbl(),        text_color=vc, bgcolor=color.new(vc, 85), text_size=sz)
+
+        // Row 5 — DXY 5-day momentum
+        dc = f_sig_col(dxy_sig)
+        dxy_str = (dxy_mom >= 0 ? "+" : "") + str.tostring(dxy_mom, "#.##") + " pts"
+        table.cell(tbl, 0, 5, "DXY 5D mom",  text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 5, dxy_str,        text_color=dc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 5, f_dxy_lbl(),    text_color=dc, bgcolor=color.new(dc, 85), text_size=sz)
+
+        // Row 6 — TNX 5-day momentum
+        tc = f_sig_col(tnx_sig)
+        tnx_str = (tnx_mom >= 0 ? "+" : "") + str.tostring(tnx_mom, "#.##") + " pts"
+        table.cell(tbl, 0, 6, "TNX 5D mom",  text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 6, tnx_str,        text_color=tc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 6, f_tnx_lbl(),    text_color=tc, bgcolor=color.new(tc, 85), text_size=sz)
+
+        // Row 7 — USDJPY 5H momentum (falling = safe-haven JPY bid = risk-off)
+        ujc = f_sig_col(uj_sig)
+        uj_str = (uj_mom >= 0 ? "+" : "") + str.tostring(uj_mom, "#.##") + " pts"
+        table.cell(tbl, 0, 7, "USDJPY 5H",   text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 7, uj_str,         text_color=ujc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 7, f_uj_lbl(),     text_color=ujc, bgcolor=color.new(ujc, 85), text_size=sz)
+
+        // Row 8 — data sources note
+        table.cell(tbl, 0, 8, "Sources",      text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 8, "TVC:VIX / DXY / TNX", text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 8, "FX_IDC:USDJPY 1H",    text_color=color.gray, bgcolor=bg, text_size=sz)
+
+    else
+        // MANUAL MODE — mirrors H2_News_v1 layout
+        imp_col  = event_impact == "High" ? color.red : event_impact == "Medium" ? color.yellow : color.gray
+        risk_col = session_risk == "LOW"  ? color.lime : session_risk == "MEDIUM" ? color.yellow : color.red
+        m_away   = mins_away >= 999 ? "–" : mins_away <= 15 ? "! " + str.tostring(mins_away) + "min" : str.tostring(mins_away) + "min"
+        m_col    = mins_away <= 15 ? color.red : mins_away <= 60 ? color.yellow : color.gray
+
+        // Row 4 — next event
+        ev_text = next_event == "" ? "None in 4hrs" : next_event
+        table.cell(tbl, 0, 4, "Next Event",  text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 4, ev_text,        text_color=imp_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 4, m_away,         text_color=m_col,   bgcolor=bg, text_size=sz)
+
+        // Row 5 — impact
+        imp_rule = event_impact == "High" ? "SUPPRESS <15min" : event_impact == "Medium" ? "Monitor" : "Low risk"
+        table.cell(tbl, 0, 5, "Impact",      text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 5, event_impact,  text_color=imp_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 5, imp_rule,      text_color=imp_col, bgcolor=bg, text_size=sz)
+
+        // Row 6 — session risk + breaking
+        brk_text = breaking_text == "" ? "No breaking" : breaking_text
+        brk_col  = breaking_text == "" ? color.gray : color.yellow
+        table.cell(tbl, 0, 6, "Session Risk", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 6, session_risk + " RISK", text_color=risk_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 6, brk_text,       text_color=brk_col, bgcolor=bg, text_size=sz)
+
+        // Row 7 — update reminder (Railway URL is in Settings > Manual Mode)
+        table.cell(tbl, 0, 7, "Update from",       text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 7, "Settings › Manual Mode › Railway URL", text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 7, "/news/status",      text_color=color.gray, bgcolor=bg, text_size=sz)
+
+        // Row 8 — empty spacer
+        table.cell(tbl, 0, 8, "", bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 8, "", bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 8, "", bgcolor=bg, text_size=sz)
+
+    // ── Row 9 — Panel 3 handoff (always shown)
+    geo_suffix = geo_risk != "NONE" ? "  GEO: " + geo_risk : ""
+    table.cell(tbl, 0, 9, "→ PANEL 3",            text_color=color.gray, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, 9, "Output: " + final_status, text_color=fc,      bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, 9, geo_suffix,               text_color=gc,       bgcolor=bg, text_size=sz)
+
+plot(na)
