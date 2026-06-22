@@ -1,0 +1,389 @@
+//@version=6
+indicator("H2 MTF Journey v1.0", shorttitle="H2·MTF", overlay=true, max_labels_count=10, max_lines_count=10)
+
+// ── INPUTS ───────────────────────────────────────────────────────────────────
+grp_tf = "Timeframes"
+tf_weekly  = input.timeframe("W",   "Weekly TF",  group=grp_tf)
+tf_daily   = input.timeframe("D",   "Daily TF",   group=grp_tf)
+tf_h4      = input.timeframe("240", "4H TF",      group=grp_tf)
+tf_h1      = input.timeframe("60",  "1H TF",      group=grp_tf)
+tf_m15     = input.timeframe("15",  "15M TF",     group=grp_tf)
+
+grp_display = "Display"
+tbl_size_in = input.string("Normal", "Table Size", options=["Tiny","Small","Normal","Large"], group=grp_display)
+show_weekly = input.bool(true, "Show Weekly Row", group=grp_display)
+
+grp_lines = "Destination Lines"
+show_lines     = input.bool(true,           "Show Destination Lines", group=grp_lines)
+line_daily_col = input.color(color.yellow,  "Daily Line Color",       group=grp_lines)
+line_h4_col    = input.color(color.orange,  "4H Line Color",          group=grp_lines)
+line_h1_col    = input.color(color.aqua,    "1H Line Color",          group=grp_lines)
+line_m15_col   = input.color(color.white,   "15M Line Color",         group=grp_lines)
+line_width     = input.int(1, "Line Width", minval=1, maxval=4,        group=grp_lines)
+line_style_inp = input.string("Dashed", "Line Style", options=["Solid","Dashed","Dotted"], group=grp_lines)
+label_offset   = input.int(8, "Label Bar Offset (bars right)", minval=1, maxval=20, group=grp_lines)
+label_size_inp = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=grp_lines)
+
+// ── TIME-DISTANCE PRESSURE ────────────────────────────────────────────────────
+// Default OFF — existing table is visually identical when disabled.
+grp_td       = "Time-Distance Pressure"
+show_td      = input.bool(false, "Show Time-Distance States", group=grp_td)
+td_lookback  = input.int(8, "Lookback (bars)", minval=2, maxval=20, group=grp_td)
+td_slope_thr = input.float(0.10, "Slope Threshold (ATR multiples)", minval=0.01, maxval=0.5, step=0.01, group=grp_td)
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+f_sz(s)     => s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+f_lstyle(s) => s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+// ── UNIFIED PER-TF STATE FUNCTION ────────────────────────────────────────────
+// Called via request.security — evaluated entirely on the target timeframe.
+// Sigma uses the same population-variance formula as the Audit panel:
+//   σ² = E[P²] − E[P]²  where E is volume-weighted and resets at the UTC day open.
+// Each request.security call site gets its own var state, so accumulators are
+// independent across timeframes and correctly track the target TF's session.
+f_full_state() =>
+    bool  _nd = ta.change(time("D")) != 0
+    var float _cv   = 0.0
+    var float _ctv  = 0.0
+    var float _ct2v = 0.0
+    if _nd
+        _cv   := 0.0
+        _ctv  := 0.0
+        _ct2v := 0.0
+    _cv   += volume
+    _ctv  += hlc3 * volume
+    _ct2v += hlc3 * hlc3 * volume
+    float _vwap  = _cv > 0.0 ? _ctv / _cv : hlc3
+    float _var   = _cv > 0.0 ? math.max(_ct2v / _cv - _vwap * _vwap, 0.0) : 0.0
+    float _sig   = math.sqrt(_var)
+    float _ratio = _sig > 0.0 ? math.abs(close - _vwap) / _sig : 0.0
+    bool  _within = _ratio < 2.0
+    float _dest  = _within ? (close > _vwap ? _vwap + 2.0 * _sig : _vwap - 2.0 * _sig) : _vwap
+    string _src  = _within ? "VWAP±2σ" : "VWAP"
+    string _dir  = close > _vwap ? "BULL" : "BEAR"
+    string _rgm  = _within ? "WITHIN" : "BEYOND"
+    float  _atr  = ta.atr(14)
+    float  _rwy  = _atr > 0.0 ? math.round(math.abs(_dest - close) / _atr, 1) : 0.0
+    [_vwap, _sig, _dir, _rgm, _dest, _src, _rwy]
+
+// ── TIME-DISTANCE STATE CLASSIFIER ───────────────────────────────────────────
+// Returns one of: "CONVERGING" / "APPROACHING" / "DIVERGING" / "STALLED"
+// Validated on 9 months JP225+USTEC 1H data, 8-bar lookback, all p<0.0001:
+//   APPROACHING: ~47-50% hit rate (+8pp vs baseline)
+//   CONVERGING:  ~42-44% hit rate (+3pp vs baseline)
+//   DIVERGING:   ~26-28% hit rate (-16pp vs baseline)
+//   STALLED:     ~29-31% hit rate (-13pp vs baseline)
+f_td_state(dest_now, dest_prior, price_now, price_prior, atr, n, slope_thr) =>
+    dest_slope     = atr > 0 ? (dest_now - dest_prior) / n / atr : 0.0
+    dist_now_val   = math.abs(price_now  - dest_now)
+    dist_prior_val = math.abs(price_prior - dest_prior)
+    dist_change    = dist_now_val - dist_prior_val
+    dest_moving    = math.abs(dest_slope) >= slope_thr
+    dist_shrinking = dist_change < -0.1 * atr
+    if dest_moving and dist_shrinking
+        "CONVERGING"
+    else if dest_moving and not dist_shrinking
+        "DIVERGING"
+    else if not dest_moving and dist_shrinking
+        "APPROACHING"
+    else
+        "STALLED"
+
+f_td_col(state) =>
+    if state == "CONVERGING"
+        color.lime
+    else if state == "APPROACHING"
+        color.aqua
+    else if state == "DIVERGING"
+        color.red
+    else
+        color.gray
+
+f_td_edge(state) =>
+    if state == "APPROACHING"
+        "+8pp"
+    else if state == "CONVERGING"
+        "+3pp"
+    else if state == "DIVERGING"
+        "-16pp"
+    else
+        "-13pp"
+
+// ── REQUEST PER TIMEFRAME ─────────────────────────────────────────────────────
+[vwap_w, sigma_w, dir_w, regime_w, dest_w, src_w, runway_w] = request.security(syminfo.tickerid, tf_weekly, f_full_state(), lookahead=barmerge.lookahead_off)
+[vwap_d, sigma_d, dir_d, regime_d, dest_d, src_d, runway_d] = request.security(syminfo.tickerid, tf_daily,  f_full_state(), lookahead=barmerge.lookahead_off)
+[vwap_4, sigma_4, dir_4, regime_4, dest_4, src_4, runway_4] = request.security(syminfo.tickerid, tf_h4,     f_full_state(), lookahead=barmerge.lookahead_off)
+[vwap_1, sigma_1, dir_1, regime_1, dest_1, src_1, runway_1] = request.security(syminfo.tickerid, tf_h1,     f_full_state(), lookahead=barmerge.lookahead_off)
+[vwap_m, sigma_m, dir_m, regime_m, dest_m, src_m, runway_m] = request.security(syminfo.tickerid, tf_m15,    f_full_state(), lookahead=barmerge.lookahead_off)
+
+// ── WEEKLY SIZE MODIFIER ─────────────────────────────────────────────────────
+bool weekly_aligned  = dir_w == "BULL" and dir_4 == "BULL"
+bool weekly_opposing = dir_w == "BEAR" and dir_4 == "BEAR"
+string weekly_mod  = weekly_aligned ? "ALIGNED" : weekly_opposing ? "OPPOSING" : "NEUTRAL"
+string weekly_size = weekly_aligned ? "Full size" : weekly_opposing ? "Full size" : "Reduced 0.5x"
+color  weekly_col  = weekly_aligned ? color.lime : weekly_opposing ? color.red : color.yellow
+
+// ── 4H JOURNEY STATE CLASSIFIER ─────────────────────────────────────────────
+bool htf_agree   = dir_d == dir_4
+bool ltf_confirm = dir_1 == dir_4
+bool in_pullback = dir_1 != dir_4
+bool near_dest   = runway_4 < 1.5
+
+int journey_state = regime_4 == "WITHIN" and htf_agree and near_dest ? 1 : regime_4 == "WITHIN" and htf_agree and not near_dest and ltf_confirm ? 3 : regime_4 == "WITHIN" and not htf_agree ? 2 : regime_4 == "BEYOND" and regime_1 == "WITHIN" ? 4 : 5
+
+string journey_label  = journey_state == 1 ? "STATE 1 — DESTINATION APPROACH" : journey_state == 2 ? "STATE 2 — PULLBACK IN PROGRESS" : journey_state == 3 ? "STATE 3 — RE-ENTRY OPPORTUNITY" : journey_state == 4 ? "STATE 4 — DISCOVERY CONSOLIDATION" : "STATE 5 — TRANSITION / NO TRADE"
+
+color journey_col = journey_state == 1 ? color.lime : journey_state == 2 ? color.yellow : journey_state == 3 ? color.new(color.lime, 0) : journey_state == 4 ? color.orange : color.red
+
+string journey_action = journey_state == 1 ? "Approaching destination — prepare entry" : journey_state == 2 ? "Pullback active — wait for " + tf_h1 + " dest: " + str.tostring(dest_1, format.mintick) : journey_state == 3 ? "Pullback complete — highest conviction entry" : journey_state == 4 ? "Discovery consolidation — wait for LTF break in " + dir_d + " direction" : "No delivery in progress — observe only"
+
+// ── 1H LEG CONFIRMATION ──────────────────────────────────────────────────────
+string leg_status = ltf_confirm ? "CONFIRMING" : in_pullback ? "PULLBACK LEG" : "NEUTRAL"
+color  leg_col    = ltf_confirm ? color.lime : in_pullback ? color.yellow : color.gray
+
+// ── 15M ENTRY TIMING ─────────────────────────────────────────────────────────
+bool timing_ready   = dir_m == dir_4 and regime_m == "WITHIN"
+bool timing_forming = dir_m == dir_4 and regime_m == "BEYOND"
+string timing_status = timing_ready ? "READY" : timing_forming ? "FORMING" : "WAIT"
+color  timing_col    = timing_ready ? color.lime : timing_forming ? color.yellow : color.red
+
+// ── TRADING HORIZON RECOMMENDATIONS ─────────────────────────────────────────
+string scalp_rec    = (journey_state == 1 or journey_state == 3) and timing_ready ? "TRADE" : (journey_state == 1 or journey_state == 3) and timing_forming ? "FORMING" : journey_state == 2 ? "WAIT — pullback" : journey_state == 4 ? "WAIT — consolidation" : "NO TRADE"
+
+string intraday_rec = (journey_state == 1 or journey_state == 3) and ltf_confirm ? "TRADE" : journey_state == 4 and ltf_confirm ? "WATCH — discovery" : journey_state == 2 ? "WATCH — monitor " + str.tostring(dest_1, format.mintick) : journey_state == 5 ? "NO TRADE" : "WAIT"
+
+string swing_rec    = (journey_state == 1 or journey_state == 3) and weekly_mod != "OPPOSING" ? "TRADE" : (journey_state == 1 or journey_state == 3) and weekly_mod == "OPPOSING" ? "REDUCED SIZE" : journey_state == 2 and htf_agree ? "WATCH — pullback entry soon" : journey_state == 4 ? "WATCH — next leg forming" : "NO TRADE"
+
+color scalp_col    = scalp_rec    == "TRADE" ? color.lime : scalp_rec    == "FORMING" ? color.yellow : scalp_rec    == "NO TRADE" ? color.red : color.orange
+color intraday_col = intraday_rec == "TRADE" ? color.lime : intraday_rec == "NO TRADE" ? color.red : intraday_rec == "WAIT" ? color.orange : color.yellow
+color swing_col    = swing_rec    == "TRADE" ? color.lime : swing_rec    == "NO TRADE" ? color.red : color.yellow
+
+// ── DESTINATION LINES + LABELS ────────────────────────────────────────────────
+// One horizontal line per TF extending label_offset bars right.
+// Smart vertical label offset: if any two destinations are within 0.3×ATR14,
+// nudge the labels vertically by 0.4×ATR14 so text doesn't collide.
+
+var line  ln_d = na
+var line  ln_4 = na
+var line  ln_1 = na
+var line  ln_m = na
+var label lb_d = na
+var label lb_4 = na
+var label lb_1 = na
+var label lb_m = na
+
+float atr14_cur = ta.atr(14)
+
+if barstate.islast and show_lines
+    line.delete(ln_d)
+    line.delete(ln_4)
+    line.delete(ln_1)
+    line.delete(ln_m)
+    label.delete(lb_d)
+    label.delete(lb_4)
+    label.delete(lb_1)
+    label.delete(lb_m)
+
+    int   x1    = bar_index
+    int   x2    = bar_index + label_offset
+    float atr_t = math.max(atr14_cur, syminfo.mintick)
+    float bump  = atr_t * 0.4
+    float thr   = atr_t * 0.3
+    ls          = f_lstyle(line_style_inp)
+    lsz         = f_sz(label_size_inp)
+
+    // Label y-positions (lines stay at true price)
+    float lyd = dest_d
+    float ly4 = dest_4
+    float ly1 = dest_1
+    float lym = dest_m
+
+    // Collision avoidance — check all 6 pairs
+    if math.abs(lyd - ly4) < thr
+        lyd := math.max(lyd, ly4) + bump
+        ly4 := math.min(dest_d, dest_4) - bump
+    if math.abs(lyd - ly1) < thr
+        lyd := math.max(lyd, ly1) + bump
+        ly1 := math.min(dest_d, dest_1) - bump
+    if math.abs(lyd - lym) < thr
+        lyd := math.max(lyd, lym) + bump
+        lym := math.min(dest_d, dest_m) - bump
+    if math.abs(ly4 - ly1) < thr
+        ly4 := math.max(ly4, ly1) + bump
+        ly1 := math.min(dest_4, dest_1) - bump
+    if math.abs(ly4 - lym) < thr
+        ly4 := math.max(ly4, lym) + bump
+        lym := math.min(dest_4, dest_m) - bump
+    if math.abs(ly1 - lym) < thr
+        ly1 := math.max(ly1, lym) + bump
+        lym := math.min(dest_1, dest_m) - bump
+
+    ln_d := line.new(x1, dest_d, x2, dest_d, color=line_daily_col, width=line_width, style=ls, extend=extend.none)
+    ln_4 := line.new(x1, dest_4, x2, dest_4, color=line_h4_col,    width=line_width, style=ls, extend=extend.none)
+    ln_1 := line.new(x1, dest_1, x2, dest_1, color=line_h1_col,    width=line_width, style=ls, extend=extend.none)
+    ln_m := line.new(x1, dest_m, x2, dest_m, color=line_m15_col,   width=line_width, style=ls, extend=extend.none)
+
+    lb_d := label.new(x2, lyd, "D: "   + str.tostring(dest_d, format.mintick), color=color.new(color.black, 100), textcolor=line_daily_col, style=label.style_label_left, size=lsz)
+    lb_4 := label.new(x2, ly4, "4H: "  + str.tostring(dest_4, format.mintick), color=color.new(color.black, 100), textcolor=line_h4_col,    style=label.style_label_left, size=lsz)
+    lb_1 := label.new(x2, ly1, "1H: "  + str.tostring(dest_1, format.mintick), color=color.new(color.black, 100), textcolor=line_h1_col,    style=label.style_label_left, size=lsz)
+    lb_m := label.new(x2, lym, "15m: " + str.tostring(dest_m, format.mintick), color=color.new(color.black, 100), textcolor=line_m15_col,   style=label.style_label_left, size=lsz)
+
+// ── TIME-DISTANCE STATES ──────────────────────────────────────────────────────
+// Uses dest_1/dest_4/dest_d already computed above. No new security calls.
+// When show_td=false every state defaults to "STALLED" — never rendered.
+td_state_1h = show_td ? f_td_state(dest_1, dest_1[td_lookback], close, close[td_lookback], atr14_cur, td_lookback, td_slope_thr) : "STALLED"
+td_state_4h = show_td ? f_td_state(dest_4, dest_4[td_lookback], close, close[td_lookback], atr14_cur, td_lookback, td_slope_thr) : "STALLED"
+td_state_d  = show_td ? f_td_state(dest_d, dest_d[td_lookback], close, close[td_lookback], atr14_cur, td_lookback, td_slope_thr) : "STALLED"
+
+// Combined score: CONVERGING/APPROACHING = +1, DIVERGING/STALLED = -1  (range -3 to +3)
+td_score_1h = td_state_1h == "CONVERGING" or td_state_1h == "APPROACHING" ? 1 : -1
+td_score_4h = td_state_4h == "CONVERGING" or td_state_4h == "APPROACHING" ? 1 : -1
+td_score_d  = td_state_d  == "CONVERGING" or td_state_d  == "APPROACHING" ? 1 : -1
+td_combined_score = td_score_1h + td_score_4h + td_score_d
+
+td_combined_label = td_combined_score >= 2 ? "STRONG POSITIVE" : td_combined_score == 1 ? "POSITIVE" : td_combined_score == -1 ? "NEGATIVE" : td_combined_score <= -2 ? "STRONG NEGATIVE" : "NEUTRAL"
+
+td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ? color.aqua : td_combined_score == -1 ? color.orange : td_combined_score <= -2 ? color.red : color.gray
+
+// ── TABLE (18 rows — bottom 5 blank when show_td=false, no visual change) ────
+var table tbl = table.new(position.bottom_right, 4, 18, border_width=1, border_color=color.new(color.gray, 60))
+
+if barstate.islast
+    sz  = f_sz(tbl_size_in)
+    bg  = color.new(color.black, 70)
+    hdr = color.new(color.gray, 50)
+
+    // Header row 0
+    table.cell(tbl, 0, 0, "H2 MTF v1.0",  text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 1, 0, "REGIME",        text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 2, 0, "DESTINATION",   text_color=color.white, bgcolor=hdr, text_size=sz)
+    table.cell(tbl, 3, 0, "ROLE",          text_color=color.white, bgcolor=hdr, text_size=sz)
+
+    // Weekly row 1 (optional)
+    if show_weekly
+        table.cell(tbl, 0, 1, "WEEKLY",    text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 1, dir_w + " " + regime_w, text_color=weekly_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 1, str.tostring(dest_w, format.mintick), text_color=color.aqua, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, 1, weekly_mod + " · " + weekly_size, text_color=weekly_col, bgcolor=bg, text_size=sz)
+
+    int r = show_weekly ? 2 : 1
+
+    // Daily
+    table.cell(tbl, 0, r,   "DAILY",       text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r,   dir_d + " " + regime_d, text_color=dir_d == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r,   str.tostring(dest_d, format.mintick) + " · " + str.tostring(runway_d) + "R", text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r,   "DESTINATION", text_color=color.gray, bgcolor=bg, text_size=sz)
+
+    // 4H
+    table.cell(tbl, 0, r+1, "4H",          text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+1, dir_4 + " " + regime_4, text_color=dir_4 == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+1, str.tostring(dest_4, format.mintick) + " · " + str.tostring(runway_4) + "R", text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+1, "JOURNEY STATE", text_color=color.gray, bgcolor=bg, text_size=sz)
+
+    // 1H
+    table.cell(tbl, 0, r+2, "1H",          text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+2, dir_1 + " " + regime_1, text_color=dir_1 == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+2, str.tostring(dest_1, format.mintick) + " · " + str.tostring(runway_1) + "R", text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+2, leg_status, text_color=leg_col, bgcolor=bg, text_size=sz)
+
+    // 15M
+    table.cell(tbl, 0, r+3, "15M",         text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+3, dir_m + " " + regime_m, text_color=dir_m == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+3, str.tostring(dest_m, format.mintick) + " · " + str.tostring(runway_m) + "R", text_color=color.aqua, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+3, timing_status, text_color=timing_col, bgcolor=bg, text_size=sz)
+
+    // Journey separator
+    table.cell(tbl, 0, r+4, "── JOURNEY ──", text_color=color.gray, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+4, "", bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+4, "", bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+4, "", bgcolor=bg, text_size=sz)
+
+    // Journey state label
+    table.cell(tbl, 0, r+5, journey_label, text_color=journey_col, bgcolor=color.new(journey_col, 80), text_size=sz)
+    table.cell(tbl, 1, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
+    table.cell(tbl, 2, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
+    table.cell(tbl, 3, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
+
+    // Journey action
+    table.cell(tbl, 0, r+6, "ACTION",       text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+6, journey_action, text_color=journey_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+6, "", bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+6, "", bgcolor=bg, text_size=sz)
+
+    // Horizons separator
+    table.cell(tbl, 0, r+7, "── HORIZONS ──", text_color=color.gray, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+7, "", bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+7, "", bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+7, "", bgcolor=bg, text_size=sz)
+
+    // Scalp
+    table.cell(tbl, 0, r+8, "SCALP (15m)",   text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+8, scalp_rec,        text_color=scalp_col,  bgcolor=color.new(scalp_col, 80), text_size=sz)
+    table.cell(tbl, 2, r+8, timing_status,    text_color=timing_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+8, "Timing: 15m",   text_color=color.gray, bgcolor=bg, text_size=sz)
+
+    // Intraday
+    table.cell(tbl, 0, r+9, "INTRADAY (1H)", text_color=color.white,   bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+9, intraday_rec,     text_color=intraday_col, bgcolor=color.new(intraday_col, 80), text_size=sz)
+    table.cell(tbl, 2, r+9, leg_status,       text_color=leg_col,      bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+9, "Confirm: 1H",   text_color=color.gray,   bgcolor=bg, text_size=sz)
+
+    // Swing
+    table.cell(tbl, 0, r+10, "SWING (4H+)",  text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+10, swing_rec,       text_color=swing_col,  bgcolor=color.new(swing_col, 80), text_size=sz)
+    table.cell(tbl, 2, r+10, weekly_mod,      text_color=weekly_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+10, "Weekly: " + weekly_mod, text_color=weekly_col, bgcolor=bg, text_size=sz)
+
+    // Panel 3 handoff row
+    table.cell(tbl, 0, r+11, "→ PANEL 3",   text_color=color.gray,  bgcolor=bg, text_size=sz)
+    table.cell(tbl, 1, r+11, journey_label,  text_color=journey_col, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 2, r+11, "S:" + scalp_rec + " I:" + intraday_rec, text_color=color.white, bgcolor=bg, text_size=sz)
+    table.cell(tbl, 3, r+11, "W:" + swing_rec, text_color=swing_col, bgcolor=bg, text_size=sz)
+
+    // ── TIME-DISTANCE SECTION (rows r+12 to r+16 — blank when show_td=false) ──
+    if show_td
+        // Separator row
+        table.cell(tbl, 0, r+12, "── TIME-DISTANCE ──", text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+12, "STATE",               text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+12, "SIGNAL",              text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+12, "EDGE",                text_color=color.gray, bgcolor=bg, text_size=sz)
+
+        // 1H time-distance
+        td1c = f_td_col(td_state_1h)
+        table.cell(tbl, 0, r+13, "1H T-D",    text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+13, td_state_1h, text_color=td1c, bgcolor=color.new(td1c, 80), text_size=sz)
+        table.cell(tbl, 2, r+13, dir_1 == "BULL" ? "UP" : "DOWN", text_color=dir_1 == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+13, f_td_edge(td_state_1h), text_color=td1c, bgcolor=bg, text_size=sz)
+
+        // 4H time-distance
+        td4c = f_td_col(td_state_4h)
+        table.cell(tbl, 0, r+14, "4H T-D",    text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+14, td_state_4h, text_color=td4c, bgcolor=color.new(td4c, 80), text_size=sz)
+        table.cell(tbl, 2, r+14, dir_4 == "BULL" ? "UP" : "DOWN", text_color=dir_4 == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+14, f_td_edge(td_state_4h), text_color=td4c, bgcolor=bg, text_size=sz)
+
+        // Daily time-distance
+        tddc = f_td_col(td_state_d)
+        table.cell(tbl, 0, r+15, "D T-D",    text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+15, td_state_d, text_color=tddc, bgcolor=color.new(tddc, 80), text_size=sz)
+        table.cell(tbl, 2, r+15, dir_d == "BULL" ? "UP" : "DOWN", text_color=dir_d == "BULL" ? color.lime : color.red, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+15, f_td_edge(td_state_d), text_color=tddc, bgcolor=bg, text_size=sz)
+
+        // Combined signal
+        table.cell(tbl, 0, r+16, "COMBINED",        text_color=color.white,      bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+16, td_combined_label, text_color=td_combined_col,  bgcolor=color.new(td_combined_col, 75), text_size=sz)
+        table.cell(tbl, 2, r+16, str.tostring(td_combined_score) + "/3 TFs", text_color=td_combined_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+16, "8-bar look",      text_color=color.gray,       bgcolor=bg, text_size=sz)
+
+// ── ALERTS (only fire when show_td is enabled) ────────────────────────────────
+// Fires on confirmed bar close when 4H T-D state changes — for signal log.
+td_state_changed = show_td and barstate.isconfirmed and td_state_4h != td_state_4h[1]
+
+if td_state_changed
+    alert('{"type":"td_state_change","symbol":"' + syminfo.ticker + '","tf":"4H","state":"' + td_state_4h + '","prev_state":"' + td_state_4h[1] + '","dest_4h":' + str.tostring(dest_4, "#.##") + ',"price":' + str.tostring(close, "#.##") + ',"journey_state":' + str.tostring(journey_state) + ',"combined_score":' + str.tostring(td_combined_score) + ',"timestamp":' + str.tostring(math.round(time / 1000)) + '}', alert.freq_once_per_bar_close)
+
+// Manual alertconditions (set in TradingView Alerts dialog)
+alertcondition(show_td and td_state_4h == "DIVERGING", title="H2 TD — 4H DIVERGING", message="Time-distance DIVERGING on 4H — destination running away from price")
+alertcondition(show_td and (td_state_4h == "CONVERGING" or td_state_4h == "APPROACHING"), title="H2 TD — 4H POSITIVE", message="Time-distance POSITIVE on 4H — destination and price converging")
+
+plot(na)
