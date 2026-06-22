@@ -125,15 +125,15 @@ f_situation(j_state, td_score, td_4h, dir4, dest4, runway4, weekly) =>
 f_trigger(j_state, dir4) =>
     dir_word = dir4 == "BULL" ? "LONG" : "SHORT"
     if j_state == 1
-        "TRIGGER: 15M bar closes " + dir_word + " with RVOL declining on approach. Enter."
+        "TRIGGER: Enter " + dir_word + " on next 15M bar that closes " + dir_word + " with RVOL declining on the approach bar."
     else if j_state == 2
-        "TRIGGER: Watch 1H destination. Reversal candle there + direction resumes = entry."
+        "TRIGGER: No " + dir_word + " entry yet. Watch 1H destination. When 1H prints a reversal candle and " + dir_word + " resumes, that is your entry."
     else if j_state == 3
-        "TRIGGER: Enter on 15M confirmation now. Re-entry windows close fast."
+        "TRIGGER: Enter " + dir_word + " immediately on 15M confirmation. Re-entry windows close fast."
     else if j_state == 4
-        "TRIGGER: Wait for 4H to flip WITHIN. State 1 or 3 will follow — that is your signal."
+        "TRIGGER: No " + dir_word + " entry yet. Wait for 4H to flip WITHIN. When STATE shifts to 1 or 3, enter " + dir_word + "."
     else
-        "TRIGGER: None. Check back next session."
+        "TRIGGER: No " + dir_word + " entry. Stand aside until new state develops."
 
 // ── REQUEST PER TIMEFRAME ─────────────────────────────────────────────────────
 [vwap_w, sigma_w, dir_w, regime_w, dest_w, src_w, runway_w] = request.security(syminfo.tickerid, tf_weekly, f_full_state(), lookahead=barmerge.lookahead_off)
