@@ -13,5 +13,14 @@ foreach ($t in $times) {
     Write-Host "$name : $r"
 }
 
+# ── Backup tasks (11:00 and 20:00 daily) ────────────────────────────────────
+$backup_bat = "C:\Users\Admin\Desktop\H2_QUANT_V1\cowork\backup.bat"
+foreach ($entry in @(@{tn="H2 Backup Morning"; st="11:00"}, @{tn="H2 Backup Evening"; st="20:00"})) {
+    schtasks /delete /tn $entry.tn /f 2>$null | Out-Null
+    $r = schtasks /create /tn $entry.tn /tr "cmd /c `"$backup_bat`"" /sc DAILY /st $entry.st /ru $user /rl HIGHEST /f
+    Write-Host "$($entry.tn) : $r"
+}
+
 Write-Host ""
-Write-Host "Verify with:  schtasks /query /fo LIST /tn H2_AutoBrief*"
+Write-Host "Verify briefs: schtasks /query /fo TABLE /tn `"H2_AutoBrief*`""
+Write-Host "Verify backup: schtasks /query /fo TABLE /tn `"H2 Backup*`""
