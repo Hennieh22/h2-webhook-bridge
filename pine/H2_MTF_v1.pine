@@ -130,8 +130,17 @@ f_td_edge(state) =>
     else
         "-13pp"
 
+// ── VWAP FIELD DOMINANCE ─────────────────────────────────────────────────────
+// gravity = inverse-distance + inverse-slope; higher = stronger active attractor
+f_gravity(vwap_now, vwap_prior, price, atr, n) =>
+    dist_norm  = atr > 0 ? math.abs(price - vwap_now) / atr : 999.0
+    slope_norm = atr > 0 ? math.abs(vwap_now - vwap_prior) / n / atr : 999.0
+    dist_score  = dist_norm  > 0 ? 1.0 / dist_norm  : 10.0
+    slope_score = slope_norm > 0 ? 1.0 / slope_norm : 10.0
+    math.min(dist_score, 10.0) + math.min(slope_score, 10.0)
+
 // f_situation: journey + TD context sentence (~120 chars max per component)
-f_situation(j_state, td_score, td_4h, dir4, dest4, runway4, weekly) =>
+f_situation(j_state, td_score, td_4h, dir4, dest4, runway4, weekly, dom, pressure) =>
     dir_word = dir4 == "BULL" ? "LONG" : "SHORT"
     opp_word = dir4 == "BULL" ? "upside" : "downside"
     dest_str = str.tostring(dest4, format.mintick)
@@ -140,7 +149,9 @@ f_situation(j_state, td_score, td_4h, dir4, dest4, runway4, weekly) =>
     td_ctx = td_score >= 2 ? "All TFs CONVERGING — max mechanical tailwind." : td_score == 1 ? "Mostly positive TFs — moderate tailwind. Take the trade." : td_score == 0 ? "Mixed TF signals — balanced forces. Destination edge present, TD adds nothing." : td_score == -1 ? "One+ TFs DIVERGING — target retreating. Reduce size 50%. No pyramiding." : "Multiple TFs DIVERGING — strong headwind. Skip or minimum size only."
     td4h = td_4h == "DIVERGING" ? " WARN: 4H DIVERGING — target retreating on primary TF." : td_4h == "CONVERGING" ? " 4H CONVERGING — mechanical support on primary TF." : td_4h == "APPROACHING" ? " 4H APPROACHING — stable target, price closing in." : ""
     wk = weekly == "ALIGNED" ? "Weekly aligned — full size." : weekly == "OPPOSING" ? "Weekly opposing — full size (system rule)." : "Weekly neutral — 0.5x size."
-    j_ctx + " " + td_ctx + td4h + " " + wk
+    dom_ctx = dom == "DAILY" ? " Daily VWAP dominant attractor." : dom == "4H" ? " 4H VWAP controlling — not Daily." : " 1H micro-field pulling hardest."
+    pres_ctx = pressure == "LOW" ? "" : pressure == "MEDIUM" ? " Displacement pressure building." : pressure == "HIGH" ? " High reversion fatigue — snap risk elevated." : " EXTREME pressure — expect sharp mean reversion."
+    j_ctx + " " + td_ctx + td4h + dom_ctx + pres_ctx + " " + wk
 
 // f_trigger: what specifically to watch for as the entry signal
 f_trigger(j_state, dir4) =>
@@ -292,6 +303,39 @@ td_combined_label = td_combined_score >= 2 ? "STRONG POSITIVE" : td_combined_sco
 
 td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ? color.aqua : td_combined_score == -1 ? color.orange : td_combined_score <= -2 ? color.red : color.gray
 
+// ── VWAP FIELD DOMINANCE ─────────────────────────────────────────────────────
+grav_d  = show_td ? f_gravity(vwap_d, vwap_d[td_lookback], close, atr14_cur, td_lookback) : 0.0
+grav_4  = show_td ? f_gravity(vwap_4, vwap_4[td_lookback], close, atr14_cur, td_lookback) : 0.0
+grav_1  = show_td ? f_gravity(vwap_1, vwap_1[td_lookback], close, atr14_cur, td_lookback) : 0.0
+
+dom_field = grav_d >= grav_4 and grav_d >= grav_1 ? "DAILY" : grav_4 >= grav_d and grav_4 >= grav_1 ? "4H" : "1H"
+dom_col   = dom_field == "DAILY" ? color.yellow : dom_field == "4H" ? color.orange : color.aqua
+dom_note  = dom_field == "DAILY" ? "Daily magnet dominant — trade toward daily dest" : dom_field == "4H" ? "4H controlling — oscillation within 4H structure" : "1H pulling — micro mean-reversion in progress"
+
+// ── TIME-WEIGHTED DISPLACEMENT ACCUMULATION (TDPA) ────────────────────────────
+// Accumulates each bar price stays beyond 1σ from VWAP; resets on VWAP cross.
+var float tdpa_d = 0.0
+var float tdpa_4 = 0.0
+var float tdpa_1 = 0.0
+
+if show_td
+    dist_d_sigma = sigma_d > 0 ? math.abs(close - vwap_d) / sigma_d : 0.0
+    cross_d = (close > vwap_d) != (close[1] > vwap_d[1])
+    tdpa_d := cross_d ? 0.0 : tdpa_d + (dist_d_sigma > 1.0 ? dist_d_sigma : 0.0)
+
+    dist_4_sigma = sigma_4 > 0 ? math.abs(close - vwap_4) / sigma_4 : 0.0
+    cross_4 = (close > vwap_4) != (close[1] > vwap_4[1])
+    tdpa_4 := cross_4 ? 0.0 : tdpa_4 + (dist_4_sigma > 1.0 ? dist_4_sigma : 0.0)
+
+    dist_1_sigma = sigma_1 > 0 ? math.abs(close - vwap_1) / sigma_1 : 0.0
+    cross_1 = (close > vwap_1) != (close[1] > vwap_1[1])
+    tdpa_1 := cross_1 ? 0.0 : tdpa_1 + (dist_1_sigma > 1.0 ? dist_1_sigma : 0.0)
+
+tdpa_combined = tdpa_d * 0.5 + tdpa_4 * 0.3 + tdpa_1 * 0.2
+tdpa_level    = tdpa_combined < 5.0 ? "LOW" : tdpa_combined < 15.0 ? "MEDIUM" : tdpa_combined < 30.0 ? "HIGH" : "EXTREME"
+tdpa_col      = tdpa_combined < 5.0 ? color.gray : tdpa_combined < 15.0 ? color.yellow : tdpa_combined < 30.0 ? color.orange : color.red
+tdpa_note     = tdpa_level == "LOW" ? "Fresh displacement — trend continuation likely" : tdpa_level == "MEDIUM" ? "Building pressure — monitor for reversal signs" : tdpa_level == "HIGH" ? "High fatigue — mean reversion risk elevated" : "EXTREME — snapback risk very high, reduce size"
+
 // ── PROP FIRM GATE CHECKS ─────────────────────────────────────────────────────
 // Computed from inputs + Pine built-ins. journey_state and td_combined_score
 // are already defined above — no new security calls needed.
@@ -324,7 +368,7 @@ prop_signal_col = prop_all_pass ? color.lime : color.red
 table tbl = na
 
 if barstate.islast
-    tbl := table.new(position.bottom_right, 4, 28, border_width=1, border_color=color.new(color.gray, 60))
+    tbl := table.new(position.bottom_right, 4, 32, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
     hdr = color.new(color.gray, 50)
@@ -452,50 +496,62 @@ if barstate.islast
         table.cell(tbl, 2, r+16, str.tostring(td_combined_score) + "/3 TFs", text_color=td_combined_col, bgcolor=bg, text_size=sz)
         table.cell(tbl, 3, r+16, "8-bar look",      text_color=color.gray,       bgcolor=bg, text_size=sz)
 
-        // Narrative split into SITUATION (r+17) and TRIGGER (r+18) to stay under string limits
-        narr_col  = td_combined_score >= 1 and journey_state <= 3 ? color.lime : td_combined_score <= -1 or journey_state == 5 ? color.red : color.yellow
-        situation = f_situation(journey_state, td_combined_score, td_state_4h, dir_4, dest_4, runway_4, weekly_mod)
-        trigger   = f_trigger(journey_state, dir_4)
-        table.cell(tbl, 0, r+17, "SITUATION", text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+17, situation, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
-        table.cell(tbl, 2, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
-        table.cell(tbl, 3, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
-        table.cell(tbl, 0, r+18, "TRIGGER", text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+18, trigger, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
-        table.cell(tbl, 2, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
-        table.cell(tbl, 3, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        // VWAP field dominance row
+        table.cell(tbl, 0, r+17, "DOMINANCE",  text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+17, dom_field + " FIELD", text_color=dom_col, bgcolor=color.new(dom_col, 80), text_size=sz)
+        table.cell(tbl, 2, r+17, dom_note,     text_color=dom_col, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 3, r+17, "D:" + str.tostring(grav_d, "#.#") + " 4H:" + str.tostring(grav_4, "#.#") + " 1H:" + str.tostring(grav_1, "#.#"), text_color=color.gray, bgcolor=bg, text_size=sz)
 
-    // ── PROP FIRM GATE SECTION (rows r+19 to r+25 — blank when show_prop=false) ─
+        // Time-weighted displacement pressure row
+        table.cell(tbl, 0, r+18, "PRESSURE",   text_color=color.white,  bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+18, tdpa_level,   text_color=tdpa_col, bgcolor=color.new(tdpa_col, 80), text_size=sz)
+        table.cell(tbl, 2, r+18, tdpa_note,    text_color=tdpa_col, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 3, r+18, "D:" + str.tostring(tdpa_d, "#.#") + " 4H:" + str.tostring(tdpa_4, "#.#"), text_color=color.gray, bgcolor=bg, text_size=sz)
+
+        // Narrative split into SITUATION (r+19) and TRIGGER (r+20)
+        narr_col  = td_combined_score >= 1 and journey_state <= 3 ? color.lime : td_combined_score <= -1 or journey_state == 5 ? color.red : color.yellow
+        situation = f_situation(journey_state, td_combined_score, td_state_4h, dir_4, dest_4, runway_4, weekly_mod, dom_field, tdpa_level)
+        trigger   = f_trigger(journey_state, dir_4)
+        table.cell(tbl, 0, r+19, "SITUATION", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+19, situation, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+19, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 3, r+19, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 0, r+20, "TRIGGER", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+20, trigger, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+20, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 3, r+20, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+
+    // ── PROP FIRM GATE SECTION (rows r+21 to r+27 — blank when show_prop=false) ─
     if show_prop
         // Separator
-        table.cell(tbl, 0, r+19, "── PROP FIRM ──",      text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+19, "LIMIT",                 text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+19, "USED / STATE",          text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+19, "GATE",                  text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 0, r+21, "── PROP FIRM ──",      text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+21, "LIMIT",                 text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+21, "USED / STATE",          text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+21, "GATE",                  text_color=color.gray, bgcolor=bg, text_size=sz)
 
         // Daily drawdown
         dd_pct_used = prop_daily_limit > 0 ? prop_dd_used / prop_daily_limit * 100 : 0.0
         dd_col = prop_dd_gate ? (dd_pct_used > 80 ? color.yellow : color.lime) : color.red
-        table.cell(tbl, 0, r+20, "Daily DD",              text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+20, "$" + str.tostring(math.round(prop_daily_limit), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+20, "$" + str.tostring(math.round(prop_dd_used), "#") + " used", text_color=dd_col, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+20, prop_dd_gate ? "PASS" : "FAIL", text_color=dd_col, bgcolor=color.new(dd_col, 80), text_size=sz)
+        table.cell(tbl, 0, r+22, "Daily DD",              text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+22, "$" + str.tostring(math.round(prop_daily_limit), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+22, "$" + str.tostring(math.round(prop_dd_used), "#") + " used", text_color=dd_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+22, prop_dd_gate ? "PASS" : "FAIL", text_color=dd_col, bgcolor=color.new(dd_col, 80), text_size=sz)
 
         // Positions + trades
         pos_tr_pass = prop_pos_gate and prop_tr_gate
         pos_tr_col  = pos_tr_pass ? color.lime : color.red
-        table.cell(tbl, 0, r+21, "Pos / Trades",          text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+21, str.tostring(prop_max_pos) + " max / " + str.tostring(prop_max_tr) + " max", text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+21, str.tostring(prop_pos_open) + " open / " + str.tostring(prop_tr_today) + " today", text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+21, pos_tr_pass ? "PASS" : "FAIL", text_color=pos_tr_col, bgcolor=color.new(pos_tr_col, 80), text_size=sz)
+        table.cell(tbl, 0, r+23, "Pos / Trades",          text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+23, str.tostring(prop_max_pos) + " max / " + str.tostring(prop_max_tr) + " max", text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+23, str.tostring(prop_pos_open) + " open / " + str.tostring(prop_tr_today) + " today", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+23, pos_tr_pass ? "PASS" : "FAIL", text_color=pos_tr_col, bgcolor=color.new(pos_tr_col, 80), text_size=sz)
 
         // H2 system gates
         h2_pass   = prop_audit_gate and prop_js_gate and prop_td_gate
         h2_col    = h2_pass ? color.lime : color.red
-        table.cell(tbl, 0, r+22, "H2 Gates",              text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+22, "A>=" + str.tostring(prop_min_audit) + " JS<=" + str.tostring(prop_min_js) + " TD>=" + str.tostring(prop_min_td), text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+22, "A:" + str.tostring(prop_audit_cur) + " JS:" + str.tostring(journey_state) + " TD:" + str.tostring(td_combined_score), text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+22, h2_pass ? "PASS" : "FAIL", text_color=h2_col, bgcolor=color.new(h2_col, 80), text_size=sz)
+        table.cell(tbl, 0, r+24, "H2 Gates",              text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+24, "A>=" + str.tostring(prop_min_audit) + " JS<=" + str.tostring(prop_min_js) + " TD>=" + str.tostring(prop_min_td), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+24, "A:" + str.tostring(prop_audit_cur) + " JS:" + str.tostring(journey_state) + " TD:" + str.tostring(td_combined_score), text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+24, h2_pass ? "PASS" : "FAIL", text_color=h2_col, bgcolor=color.new(h2_col, 80), text_size=sz)
 
         // Firm restrictions
         restr_pass = prop_wknd_gate and prop_ovn_gate and prop_news_gate
@@ -503,22 +559,22 @@ if barstate.islast
         wknd_str   = prop_wknd_ok ? "Wknd OK" : (prop_is_friday ? "FRI-WARN" : "Wknd OK")
         ovn_str    = prop_ovn_ok  ? "Ovn OK"  : (prop_after_hours ? "AH-WARN" : "Ovn OK")
         news_str   = prop_news_ok ? "News OK" : "News OFF"
-        table.cell(tbl, 0, r+23, "Firm Rules",            text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+23, "Wknd / Ovn / News",    text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+23, wknd_str + " " + ovn_str + " " + news_str, text_color=restr_col, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+23, restr_pass ? "PASS" : "FAIL", text_color=restr_col, bgcolor=color.new(restr_col, 80), text_size=sz)
+        table.cell(tbl, 0, r+25, "Firm Rules",            text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+25, "Wknd / Ovn / News",    text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+25, wknd_str + " " + ovn_str + " " + news_str, text_color=restr_col, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+25, restr_pass ? "PASS" : "FAIL", text_color=restr_col, bgcolor=color.new(restr_col, 80), text_size=sz)
 
         // Position sizing
-        table.cell(tbl, 0, r+24, "Position Size",         text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+24, str.tostring(prop_risk_pct, "#.#") + "% = $" + str.tostring(math.round(prop_risk_dollar), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, r+24, str.tostring(prop_lot_size, "#.##") + " lots", text_color=color.aqua, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 3, r+24, "", bgcolor=bg, text_size=sz)
+        table.cell(tbl, 0, r+26, "Position Size",         text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+26, str.tostring(prop_risk_pct, "#.#") + "% = $" + str.tostring(math.round(prop_risk_dollar), "#"), text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, r+26, str.tostring(prop_lot_size, "#.##") + " lots", text_color=color.aqua, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 3, r+26, "", bgcolor=bg, text_size=sz)
 
         // Final prop signal — full-width visual
-        table.cell(tbl, 0, r+25, "PROP SIGNAL",           text_color=color.white, bgcolor=color.new(prop_signal_col, 70), text_size=sz)
-        table.cell(tbl, 1, r+25, prop_signal,             text_color=prop_signal_col, bgcolor=color.new(prop_signal_col, 80), text_size=sz, text_halign=text.align_left)
-        table.cell(tbl, 2, r+25, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
-        table.cell(tbl, 3, r+25, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
+        table.cell(tbl, 0, r+27, "PROP SIGNAL",           text_color=color.white, bgcolor=color.new(prop_signal_col, 70), text_size=sz)
+        table.cell(tbl, 1, r+27, prop_signal,             text_color=prop_signal_col, bgcolor=color.new(prop_signal_col, 80), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+27, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
+        table.cell(tbl, 3, r+27, "",                      bgcolor=color.new(prop_signal_col, 80), text_size=sz)
 
 // ── ALERTS (only fire when show_td is enabled) ────────────────────────────────
 // Fires on confirmed bar close when 4H T-D state changes — for signal log.
