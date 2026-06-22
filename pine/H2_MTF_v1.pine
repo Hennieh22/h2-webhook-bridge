@@ -249,7 +249,7 @@ td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ?
 table tbl = na
 
 if barstate.islast
-    tbl := table.new(position.bottom_right, 4, 18, border_width=1, border_color=color.new(color.gray, 60))
+    tbl := table.new(position.bottom_right, 4, 20, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
     hdr = color.new(color.gray, 50)
