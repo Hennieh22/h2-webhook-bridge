@@ -98,33 +98,40 @@ auto_status = count_status
 
 // ── COMBINE: mode → geo override → final ─────────────────────────────────────
 base_status  = auto_mode ? auto_status : manual_status
-final_status = geo_risk == "ACTIVE"   ? "SUPPRESS" :
-     geo_risk == "ELEVATED" and base_status == "CLEAR" ? "CAUTION" : base_status
+final_status = geo_risk == "ACTIVE" ? "SUPPRESS" : geo_risk == "ELEVATED" and base_status == "CLEAR" ? "CAUTION" : base_status
 
 // ── SIGNAL LABELS ─────────────────────────────────────────────────────────────
 f_vix_lbl() =>
-    vix_direct_suppress ? "SUPPRESS (" + str.tostring(vix_px, "#.#") + ")" :
-    vix_sig == 1        ? "CAUTION  (" + str.tostring(vix_px, "#.#") + ")" :
-                          "OK       (" + str.tostring(vix_px, "#.#") + ")"
+    if vix_direct_suppress
+        "SUPPRESS (" + str.tostring(vix_px, "#.#") + ")"
+    else if vix_sig == 1
+        "CAUTION  (" + str.tostring(vix_px, "#.#") + ")"
+    else
+        "OK       (" + str.tostring(vix_px, "#.#") + ")"
 
 f_dxy_lbl() =>
-    dxy_sig == 1 ? "RISK-OFF ▲ +" + str.tostring(dxy_mom, "#.##") + "pts" :
-                   "OK  "         + (dxy_mom >= 0 ? "+" : "") + str.tostring(dxy_mom, "#.##") + "pts"
+    if dxy_sig == 1
+        "RISK-OFF ▲ +" + str.tostring(dxy_mom, "#.##") + "pts"
+    else
+        "OK  " + (dxy_mom >= 0 ? "+" : "") + str.tostring(dxy_mom, "#.##") + "pts"
 
 f_tnx_lbl() =>
-    tnx_sig == 1 ? "YIELD PRESS ▲ +" + str.tostring(tnx_mom, "#.##") + "pts" :
-                   "OK  "             + (tnx_mom >= 0 ? "+" : "") + str.tostring(tnx_mom, "#.##") + "pts"
+    if tnx_sig == 1
+        "YIELD PRESS ▲ +" + str.tostring(tnx_mom, "#.##") + "pts"
+    else
+        "OK  " + (tnx_mom >= 0 ? "+" : "") + str.tostring(tnx_mom, "#.##") + "pts"
 
 f_uj_lbl() =>
-    uj_sig == 1 ? "JPY BID ▼ "  + str.tostring(uj_mom, "#.##") + "pts" :
-                  "OK  "         + (uj_mom >= 0 ? "+" : "") + str.tostring(uj_mom, "#.##") + "pts"
+    if uj_sig == 1
+        "JPY BID ▼ " + str.tostring(uj_mom, "#.##") + "pts"
+    else
+        "OK  " + (uj_mom >= 0 ? "+" : "") + str.tostring(uj_mom, "#.##") + "pts"
 
 f_sig_col(active) => active == 1 ? color.yellow : color.lime
 
 // ── TABLE — 3 cols × 10 rows ──────────────────────────────────────────────────
 if barstate.islast
-    tbl    = table.new(f_pos(tbl_pos_in), 3, 10,
-                 border_width=1, border_color=color.new(color.gray, 60))
+    tbl    = table.new(f_pos(tbl_pos_in), 3, 10, border_width=1, border_color=color.new(color.gray, 60))
     sz     = f_sz(tbl_size_in)
     bg     = color.new(color.black, 70)
     hdr_bg = color.new(color.gray,  50)
@@ -135,23 +142,19 @@ if barstate.islast
     // ── Row 0 — header ────────────────────────────────────────────────────────
     mode_lbl = auto_mode ? "AUTO" : "MANUAL"
     mode_col = auto_mode ? color.aqua : color.orange
-    utc_str  = auto_mode ? str.format("{0,date,HH:mm} UTC", time) :
-                           (last_updated == "" ? "Not updated" : last_updated)
+    utc_str  = auto_mode ? str.format("{0,date,HH:mm} UTC", time) : last_updated == "" ? "Not updated" : last_updated
     table.cell(tbl, 0, 0, "H2 NEWS v2.0", text_color=color.white, bgcolor=hdr_bg, text_size=sz)
     table.cell(tbl, 1, 0, mode_lbl,        text_color=mode_col,    bgcolor=hdr_bg, text_size=sz)
     table.cell(tbl, 2, 0, utc_str,         text_color=color.gray,  bgcolor=hdr_bg, text_size=sz)
 
     // ── Row 1 — final status ──────────────────────────────────────────────────
-    src_lbl = geo_risk == "ACTIVE"   ? "GEO OVERRIDE" :
-              auto_mode              ? str.tostring(sig_count) + "/4 signals" :
-                                       "MANUAL"
+    src_lbl = geo_risk == "ACTIVE" ? "GEO OVERRIDE" : auto_mode ? str.tostring(sig_count) + "/4 signals" : "MANUAL"
     table.cell(tbl, 0, 1, "SESSION STATUS", text_color=color.white, bgcolor=bg,                    text_size=sz)
     table.cell(tbl, 1, 1, final_status,     text_color=fc,          bgcolor=color.new(fc, 80),     text_size=sz)
     table.cell(tbl, 2, 1, src_lbl,          text_color=color.gray,  bgcolor=bg,                    text_size=sz)
 
     // ── Row 2 — geo risk ──────────────────────────────────────────────────────
-    geo_note = geo_risk == "ACTIVE"   ? "→ FORCED SUPPRESS" :
-               geo_risk == "ELEVATED" ? "→ CAUTION floor"   : "No override"
+    geo_note = geo_risk == "ACTIVE" ? "→ FORCED SUPPRESS" : geo_risk == "ELEVATED" ? "→ CAUTION floor" : "No override"
     table.cell(tbl, 0, 2, "GEO RISK", text_color=color.white, bgcolor=bg,                text_size=sz)
     table.cell(tbl, 1, 2, geo_risk,   text_color=gc,          bgcolor=color.new(gc, 85), text_size=sz)
     table.cell(tbl, 2, 2, geo_note,   text_color=gc,          bgcolor=bg,                text_size=sz)
@@ -168,45 +171,38 @@ if barstate.islast
         vc = vix_direct_suppress ? color.red : f_sig_col(vix_sig)
         table.cell(tbl, 0, 4, "VIX (CBOE)",  text_color=color.white, bgcolor=bg,                text_size=sz)
         table.cell(tbl, 1, 4, f_vix_lbl(),   text_color=vc,          bgcolor=color.new(vc, 85), text_size=sz)
-        table.cell(tbl, 2, 4, vix_direct_suppress ? "DIRECT SUPPRESS" : vix_sig == 1 ? "active ✓" : "clear",
-            text_color=vc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 4, vix_direct_suppress ? "DIRECT SUPPRESS" : vix_sig == 1 ? "active ✓" : "clear", text_color=vc, bgcolor=bg, text_size=sz)
 
         // Row 5 — DXY 5-day
         dc = f_sig_col(dxy_sig)
         table.cell(tbl, 0, 5, "DXY 5D mom",  text_color=color.white, bgcolor=bg,                text_size=sz)
         table.cell(tbl, 1, 5, f_dxy_lbl(),   text_color=dc,          bgcolor=color.new(dc, 85), text_size=sz)
-        table.cell(tbl, 2, 5, dxy_sig == 1 ? "active ✓" : "clear",
-            text_color=dc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 5, dxy_sig == 1 ? "active ✓" : "clear", text_color=dc, bgcolor=bg, text_size=sz)
 
         // Row 6 — TNX 3-day
         tc = f_sig_col(tnx_sig)
         table.cell(tbl, 0, 6, "TNX 3D mom",  text_color=color.white, bgcolor=bg,                text_size=sz)
         table.cell(tbl, 1, 6, f_tnx_lbl(),   text_color=tc,          bgcolor=color.new(tc, 85), text_size=sz)
-        table.cell(tbl, 2, 6, tnx_sig == 1 ? "active ✓" : "clear",
-            text_color=tc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 6, tnx_sig == 1 ? "active ✓" : "clear", text_color=tc, bgcolor=bg, text_size=sz)
 
         // Row 7 — USDJPY 5-day (Daily)
         ujc = f_sig_col(uj_sig)
         table.cell(tbl, 0, 7, "USDJPY 5D",   text_color=color.white, bgcolor=bg,                 text_size=sz)
         table.cell(tbl, 1, 7, f_uj_lbl(),    text_color=ujc,         bgcolor=color.new(ujc, 85), text_size=sz)
-        table.cell(tbl, 2, 7, uj_sig == 1 ? "active ✓" : "clear",
-            text_color=ujc, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 7, uj_sig == 1 ? "active ✓" : "clear", text_color=ujc, bgcolor=bg, text_size=sz)
 
         // Row 8 — sources / count
         count_col = sig_count >= 3 ? color.red : sig_count >= 2 ? color.yellow : color.lime
         count_lbl = str.tostring(sig_count) + "/4 firing  (0-1=CLEAR  2=CAUTION  3+=SUPPRESS)"
         table.cell(tbl, 0, 8, "Signals",  text_color=color.gray,  bgcolor=bg, text_size=sz)
         table.cell(tbl, 1, 8, count_lbl,  text_color=count_col,   bgcolor=bg, text_size=sz)
-        table.cell(tbl, 2, 8, "CBOE:VIX / TVC:DXY / TVC:US10Y / USDJPY",
-            text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 2, 8, "CBOE:VIX / TVC:DXY / TVC:US10Y / USDJPY", text_color=color.gray, bgcolor=bg, text_size=sz)
 
     else
         // MANUAL MODE — mirrors H2_News_v1 layout
         imp_col  = event_impact == "High" ? color.red : event_impact == "Medium" ? color.yellow : color.gray
         risk_col = session_risk == "HIGH" ? color.red : session_risk == "MEDIUM" ? color.yellow : color.lime
-        m_away   = mins_away >= 999 ? "–" :
-                   mins_away <= 15  ? "! " + str.tostring(mins_away) + " min" :
-                                      str.tostring(mins_away) + " min"
+        m_away   = mins_away >= 999 ? "–" : mins_away <= 15 ? "! " + str.tostring(mins_away) + " min" : str.tostring(mins_away) + " min"
         m_col    = mins_away <= 15 ? color.red : mins_away <= 60 ? color.yellow : color.gray
 
         // Row 4 — next event
@@ -230,8 +226,7 @@ if barstate.islast
 
         // Row 7 — Railway URL reminder
         table.cell(tbl, 0, 7, "Update from",  text_color=color.gray, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, 7, "Settings → Manual Mode → Railway URL",
-            text_color=color.gray, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, 7, "Settings → Manual Mode → Railway URL", text_color=color.gray, bgcolor=bg, text_size=sz)
         table.cell(tbl, 2, 7, "/news/status", text_color=color.gray, bgcolor=bg, text_size=sz)
 
         // Row 8 — spacer
