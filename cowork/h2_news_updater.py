@@ -11,6 +11,7 @@ Cowork reads the instruction file and executes the TradingView update.
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,8 @@ def format_instruction(state: dict) -> str:
     mins = state.get("mins_away", 999)
     mins_display = "999 (none)" if mins >= 999 else str(mins)
 
+    tv_url = os.environ.get("TV_CHART_URL", "https://www.tradingview.com/chart/PAZGQaDG/")
+
     lines = [
         "=" * 68,
         "H2 NEWS PANEL UPDATE — COWORK COMPUTER-USE INSTRUCTION",
@@ -59,8 +62,8 @@ def format_instruction(state: dict) -> str:
         "",
         "PRE-FLIGHT:",
         "  1. Take a screenshot to confirm TradingView is open.",
-        "  2. If TradingView is not open: open Microsoft Edge, navigate to",
-        "     https://www.tradingview.com and open the H2 Indices System chart.",
+        f"  2. If TradingView is not open: open Microsoft Edge, navigate to",
+        f"     {tv_url}",
         "  3. Confirm the chart is loaded and the H2·NEWS v2 indicator is visible.",
         "",
         "STEPS:",

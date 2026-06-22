@@ -3,10 +3,13 @@
 ## Setup
 This project folder must be opened in Claude Cowork (desktop tool).
 
-Environment variables required in your system or .env file:
+Environment variables required (set via Windows System Properties → Environment Variables):
 - ANTHROPIC_API_KEY = your Claude API key
-- FMP_API_KEY = p78jbm6tzFGhlDzijcmybkqJuNBeXFlv
-- RAILWAY_URL = https://h2-webhook-bridge-production-872e.up.railway.app
+- FMP_API_KEY       = p78jbm6tzFGhlDzijcmybkqJuNBeXFlv
+- RAILWAY_URL       = https://h2-webhook-bridge-production-872e.up.railway.app
+- TV_CHART_URL      = https://www.tradingview.com/chart/PAZGQaDG/
+
+When computer-use needs to open TradingView, navigate to TV_CHART_URL (the H2 Indices System chart).
 
 ## Commands
 
