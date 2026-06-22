@@ -24,6 +24,14 @@ line_style_inp = input.string("Dashed", "Line Style", options=["Solid","Dashed",
 label_offset   = input.int(8, "Label Bar Offset (bars right)", minval=1, maxval=20, group=grp_lines)
 label_size_inp = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large"], group=grp_lines)
 
+// ── SIMPLE MODE ──────────────────────────────────────────────────────────────
+// Replaces the full table with a single plain-English signal view.
+grp_simple  = "Simple Mode"
+show_simple = input.bool(false, "SIMPLE MODE — Beginner Signal View", group=grp_simple)
+simple_style = input.string("Intraday", "Trading Style", options=["Scalp","Intraday","Swing"], group=grp_simple)
+simple_risk  = input.float(0.5, "Risk Per Trade (%)", group=grp_simple, step=0.1)
+simple_acct  = input.float(50000, "Account Size ($)", group=grp_simple, step=1000)
+
 // ── TIME-DISTANCE PRESSURE ────────────────────────────────────────────────────
 // Default OFF — existing table is visually identical when disabled.
 grp_td       = "Time-Distance Pressure"
@@ -364,10 +372,86 @@ prop_dir_word  = dir_4 == "BULL" ? "LONG" : "SHORT"
 prop_signal    = prop_all_pass ? "TRADE " + prop_dir_word + " — $" + str.tostring(math.round(prop_risk_dollar), "#") + " risk / " + str.tostring(prop_lot_size, "#.##") + " lots" : "BLOCKED — " + prop_fail_reason
 prop_signal_col = prop_all_pass ? color.lime : color.red
 
+// ── SIMPLE MODE SIGNAL ────────────────────────────────────────────────────────
+simple_long  = dir_4 == "BULL" and (journey_state == 1 or journey_state == 3) and td_combined_score >= 0
+simple_short = dir_4 == "BEAR" and (journey_state == 1 or journey_state == 3) and td_combined_score >= 0
+
+simple_signal  = simple_long  ? "UP  LONG"  : simple_short ? "DN  SHORT" : "--  WAIT"
+simple_sig_col = simple_long  ? color.lime : simple_short ? color.red : color.gray
+
+simple_atr_mult_entry = simple_style == "Scalp" ? 0.2 : simple_style == "Swing" ? 0.5 : 0.3
+simple_atr_mult_stop  = simple_style == "Scalp" ? 0.5 : simple_style == "Swing" ? 1.5 : 1.0
+
+simple_entry_hi = close + atr14_cur * simple_atr_mult_entry
+simple_entry_lo = close - atr14_cur * simple_atr_mult_entry
+
+simple_stop = simple_long ? close - atr14_cur * simple_atr_mult_stop : simple_short ? close + atr14_cur * simple_atr_mult_stop : na
+
+simple_t1_dist = math.min(math.abs(close - dest_1), math.min(math.abs(close - dest_4), math.abs(close - dest_d)))
+simple_t1 = math.abs(close - dest_1) == simple_t1_dist ? dest_1 : math.abs(close - dest_4) == simple_t1_dist ? dest_4 : dest_d
+
+simple_t2_d1 = math.abs(close - dest_1) == simple_t1_dist ? 999999.0 : math.abs(close - dest_1)
+simple_t2_d4 = math.abs(close - dest_4) == simple_t1_dist ? 999999.0 : math.abs(close - dest_4)
+simple_t2_dd = math.abs(close - dest_d) == simple_t1_dist ? 999999.0 : math.abs(close - dest_d)
+simple_t2_dist = math.min(simple_t2_d1, math.min(simple_t2_d4, simple_t2_dd))
+simple_t2 = simple_t2_dist == simple_t2_d1 ? dest_1 : simple_t2_dist == simple_t2_d4 ? dest_4 : dest_d
+
+simple_risk_dollar = simple_acct * simple_risk / 100
+simple_t1_r = atr14_cur > 0 ? math.abs(simple_t1 - close) / atr14_cur : 0.0
+simple_t2_r = atr14_cur > 0 ? math.abs(simple_t2 - close) / atr14_cur : 0.0
+
+simple_conf = (journey_state == 1 ? 40 : journey_state == 3 ? 35 : 0) + (td_combined_score >= 2 ? 30 : td_combined_score >= 1 ? 20 : td_combined_score >= 0 ? 10 : 0) + (weekly_mod == "ALIGNED" ? 20 : weekly_mod == "NEUTRAL" ? 10 : 5) + (regime_4 == "WITHIN" ? 10 : 0)
+
+simple_what = simple_long and journey_state == 1 ? syminfo.ticker + " is heading toward its target price from below. All timeframes agree it should go higher. Wait for a small pullback or the next green candle to enter." : simple_long and journey_state == 3 ? syminfo.ticker + " just finished a temporary pullback and is ready to continue higher. This is often the cleanest entry of the whole move. Enter on the next green candle." : simple_short and journey_state == 1 ? syminfo.ticker + " is heading toward its target price from above. All timeframes agree it should go lower. Wait for a small bounce or the next red candle to enter." : simple_short and journey_state == 3 ? syminfo.ticker + " just finished a temporary bounce and is ready to continue lower. This is often the cleanest entry of the whole move. Enter on the next red candle." : journey_state == 2 ? syminfo.ticker + " is in a temporary pullback right now. Do not enter yet. Wait for it to stabilise and show signs of resuming the main direction." : journey_state == 4 ? syminfo.ticker + " has moved too far too fast and is now cooling off. Wait for it to settle back into its normal range before entering." : "No clear setup right now on " + syminfo.ticker + ". The market is transitioning between states. Sit on your hands and wait for clarity."
+
+simple_dir_str = simple_long ? "UP" : "DOWN"
+simple_trigger = simple_style == "Scalp" ? "Enter on the next 15-minute candle that closes in the " + simple_dir_str + " direction." : simple_style == "Swing" ? "Enter on the next 1-hour candle close. Hold the position across sessions until Target 1 is reached." : "Enter when the 15-minute chart shows a candle closing in the " + simple_dir_str + " direction. Aim for Target 1."
+
+simple_press = not show_td ? "Enable Time-Distance for pressure reading." : tdpa_level == "LOW" ? "Move is fresh — good timing." : tdpa_level == "MEDIUM" ? "Move has been running a while — be ready to exit quickly." : tdpa_level == "HIGH" ? "Market is stretched — keep target small." : "Market extremely stretched — high risk of reversal."
+
+// Chart label — large directional signal painted on price chart
+var label simple_lbl = na
+
 // ── TABLE (recreated every barstate.islast so row count is always correct) ───
 table tbl = na
 
-if barstate.islast
+if barstate.islast and show_simple
+    label.delete(simple_lbl[1])
+    lbl_style = simple_long ? label.style_label_up : simple_short ? label.style_label_down : label.style_label_left
+    lbl_col   = simple_long ? color.new(color.lime, 20) : simple_short ? color.new(color.red, 20) : color.new(color.gray, 20)
+    simple_lbl := label.new(bar_index, close, simple_signal + "\n" + str.tostring(simple_conf) + "% confidence", style=lbl_style, color=lbl_col, textcolor=color.white, size=size.large)
+    tbl := table.new(position.bottom_right, 2, 12, border_width=1, border_color=color.new(color.gray, 50))
+    sz2 = size.normal
+    bg2 = color.new(color.black, 70)
+    hdr2 = color.new(color.gray, 40)
+    sep2 = color.new(color.gray, 80)
+    conf_col = simple_conf >= 80 ? color.lime : simple_conf >= 60 ? color.yellow : color.gray
+    table.cell(tbl, 0,  0, "H2 SIMPLE MODE — " + simple_style,    text_color=color.white,  bgcolor=hdr2, text_size=sz2)
+    table.cell(tbl, 1,  0, syminfo.ticker,                         text_color=color.aqua,   bgcolor=hdr2, text_size=sz2)
+    table.cell(tbl, 0,  1, "SIGNAL",                               text_color=color.white,  bgcolor=color.new(simple_sig_col, 70), text_size=sz2)
+    table.cell(tbl, 1,  1, simple_signal,                          text_color=simple_sig_col, bgcolor=color.new(simple_sig_col, 70), text_size=sz2)
+    table.cell(tbl, 0,  2, "CONFIDENCE",                           text_color=color.white,  bgcolor=bg2,  text_size=sz2)
+    table.cell(tbl, 1,  2, str.tostring(simple_conf) + "%",        text_color=conf_col,     bgcolor=bg2,  text_size=sz2)
+    table.cell(tbl, 0,  3, "WHAT IS HAPPENING",                    text_color=color.gray,   bgcolor=sep2, text_size=size.small)
+    table.cell(tbl, 1,  3, "",                                      bgcolor=sep2,            text_size=size.small)
+    table.cell(tbl, 0,  4, simple_what,                             text_color=color.white,  bgcolor=bg2,  text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1,  4, "",                                      bgcolor=bg2,             text_size=sz2)
+    table.cell(tbl, 0,  5, "WHAT TO DO",                           text_color=color.gray,   bgcolor=sep2, text_size=size.small)
+    table.cell(tbl, 1,  5, "",                                      bgcolor=sep2,            text_size=size.small)
+    table.cell(tbl, 0,  6, simple_trigger,                          text_color=color.yellow, bgcolor=bg2,  text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1,  6, "",                                      bgcolor=bg2,             text_size=sz2)
+    table.cell(tbl, 0,  7, "LEVELS",                                text_color=color.gray,   bgcolor=sep2, text_size=size.small)
+    table.cell(tbl, 1,  7, "",                                      bgcolor=sep2,            text_size=size.small)
+    table.cell(tbl, 0,  8, "ENTRY ZONE",                           text_color=color.white,  bgcolor=bg2,  text_size=sz2)
+    table.cell(tbl, 1,  8, str.tostring(simple_entry_lo, format.mintick) + " — " + str.tostring(simple_entry_hi, format.mintick), text_color=color.aqua, bgcolor=bg2, text_size=sz2)
+    table.cell(tbl, 0,  9, "STOP  /  TARGET 1",                    text_color=color.white,  bgcolor=bg2,  text_size=sz2)
+    table.cell(tbl, 1,  9, str.tostring(simple_stop, format.mintick) + "  /  " + str.tostring(simple_t1, format.mintick) + "  (" + str.tostring(simple_t1_r, "#.#") + "R)", text_color=color.aqua, bgcolor=bg2, text_size=sz2)
+    table.cell(tbl, 0, 10, "RISK PER TRADE",                       text_color=color.white,  bgcolor=bg2,  text_size=sz2)
+    table.cell(tbl, 1, 10, "$" + str.tostring(math.round(simple_risk_dollar), "#") + "  (" + str.tostring(simple_risk, "#.#") + "% of $" + str.tostring(math.round(simple_acct), "#") + ")", text_color=color.yellow, bgcolor=bg2, text_size=sz2)
+    table.cell(tbl, 0, 11, "TIMING NOTE",                          text_color=color.white,  bgcolor=bg2,  text_size=size.small)
+    table.cell(tbl, 1, 11, simple_press,                            text_color=color.gray,   bgcolor=bg2,  text_size=size.small, text_halign=text.align_left)
+
+if barstate.islast and not show_simple
     tbl := table.new(position.bottom_right, 4, 32, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
