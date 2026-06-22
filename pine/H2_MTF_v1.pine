@@ -109,23 +109,31 @@ f_td_edge(state) =>
     else
         "-13pp"
 
-f_narrative(j_state, td_score, dir4, dest4, runway4, weekly, scalp, intra, swing) =>
+// f_situation: journey + TD context sentence (~120 chars max per component)
+f_situation(j_state, td_score, td_4h, dir4, dest4, runway4, weekly) =>
     dir_word = dir4 == "BULL" ? "LONG" : "SHORT"
+    opp_word = dir4 == "BULL" ? "upside" : "downside"
     dest_str = str.tostring(dest4, format.mintick)
     rwy_str  = str.tostring(runway4, "#.#")
-    td_qual  = td_score >= 2  ? "Strong mechanical tailwind (CONVERGING)." : td_score == 1 ? "Moderate tailwind." : td_score == -1 ? "Mild headwind — size down." : "Strong headwind (DIVERGING) — reduce size or wait."
-    j_action = j_state == 1 ? "Approaching destination — prepare entry." : j_state == 2 ? "Pullback in progress — wait for leg to complete." : j_state == 3 ? "Pullback complete — highest conviction re-entry." : j_state == 4 ? "Consolidating — wait for LTF break." : "No trade — transition phase."
-    wk_note  = weekly == "OPPOSING" ? "Weekly opposing — full size still valid per system rules." : weekly == "ALIGNED" ? "Weekly aligned — full size confirmed." : "Weekly neutral — reduced size (0.5x)."
-    active = ""
-    if scalp == "TRADE"
-        active := active + "Scalp "
-    if intra == "TRADE"
-        active := active + "Intraday "
-    if swing == "TRADE"
-        active := active + "Swing"
-    if active == ""
-        active := "No active horizon"
-    dir_word + " toward " + dest_str + " (" + rwy_str + "R). " + j_action + " " + td_qual + " " + wk_note + " Active: " + active + "."
+    j_ctx = j_state == 1 ? dir_word + " destination " + dest_str + " (" + rwy_str + "R) in range. Highest-conviction entry window." : j_state == 2 ? "Pullback vs " + dir_word + " structure. System reloading — do not enter. Wait for 1H dest." : j_state == 3 ? "Pullback complete. " + opp_word + " resuming. Re-entry window open — often the cleanest entry of the move." : j_state == 4 ? "Beyond 4H VWAP bands. Overextended. Wait for LTF close back WITHIN regime." : "No delivery in progress. No momentum. Sit on hands."
+    td_ctx = td_score >= 2 ? "All TFs CONVERGING — max mechanical tailwind." : td_score == 1 ? "Mostly positive TFs — moderate tailwind. Take the trade." : td_score == 0 ? "Mixed TF signals — balanced forces. Destination edge present, TD adds nothing." : td_score == -1 ? "One+ TFs DIVERGING — target retreating. Reduce size 50%. No pyramiding." : "Multiple TFs DIVERGING — strong headwind. Skip or minimum size only."
+    td4h = td_4h == "DIVERGING" ? " WARN: 4H DIVERGING — target retreating on primary TF." : td_4h == "CONVERGING" ? " 4H CONVERGING — mechanical support on primary TF." : td_4h == "APPROACHING" ? " 4H APPROACHING — stable target, price closing in." : ""
+    wk = weekly == "ALIGNED" ? "Weekly aligned — full size." : weekly == "OPPOSING" ? "Weekly opposing — full size (system rule)." : "Weekly neutral — 0.5x size."
+    j_ctx + " " + td_ctx + td4h + " " + wk
+
+// f_trigger: what specifically to watch for as the entry signal
+f_trigger(j_state, dir4) =>
+    dir_word = dir4 == "BULL" ? "LONG" : "SHORT"
+    if j_state == 1
+        "TRIGGER: 15M bar closes " + dir_word + " with RVOL declining on approach. Enter."
+    else if j_state == 2
+        "TRIGGER: Watch 1H destination. Reversal candle there + direction resumes = entry."
+    else if j_state == 3
+        "TRIGGER: Enter on 15M confirmation now. Re-entry windows close fast."
+    else if j_state == 4
+        "TRIGGER: Wait for 4H to flip WITHIN. State 1 or 3 will follow — that is your signal."
+    else
+        "TRIGGER: None. Check back next session."
 
 // ── REQUEST PER TIMEFRAME ─────────────────────────────────────────────────────
 [vwap_w, sigma_w, dir_w, regime_w, dest_w, src_w, runway_w] = request.security(syminfo.tickerid, tf_weekly, f_full_state(), lookahead=barmerge.lookahead_off)
@@ -267,7 +275,7 @@ td_combined_col = td_combined_score >= 2 ? color.lime : td_combined_score == 1 ?
 table tbl = na
 
 if barstate.islast
-    tbl := table.new(position.bottom_right, 4, 21, border_width=1, border_color=color.new(color.gray, 60))
+    tbl := table.new(position.bottom_right, 4, 22, border_width=1, border_color=color.new(color.gray, 60))
     sz  = f_sz(tbl_size_in)
     bg  = color.new(color.black, 70)
     hdr = color.new(color.gray, 50)
@@ -318,10 +326,11 @@ if barstate.islast
     table.cell(tbl, 3, r+4, "", bgcolor=bg, text_size=sz)
 
     // Journey state label
-    table.cell(tbl, 0, r+5, journey_label, text_color=journey_col, bgcolor=color.new(journey_col, 80), text_size=sz)
-    table.cell(tbl, 1, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
-    table.cell(tbl, 2, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
-    table.cell(tbl, 3, r+5, "", bgcolor=color.new(journey_col, 80), text_size=sz)
+    state_advisory = journey_state == 1 ? "Price near target. Set entry alert. Prepare size." : journey_state == 2 ? "Do NOT enter. Wait for pullback to complete. Monitor 1H dest." : journey_state == 3 ? "Best entry window. Pullback done. Enter on 15M confirmation." : journey_state == 4 ? "Wait. Price overextended. Watch for LTF break back into range." : "Stand aside. No delivery in progress. No trade."
+    table.cell(tbl, 0, r+5, journey_label,   text_color=journey_col, bgcolor=color.new(journey_col, 80), text_size=sz)
+    table.cell(tbl, 1, r+5, "",              bgcolor=color.new(journey_col, 80), text_size=sz)
+    table.cell(tbl, 2, r+5, state_advisory,  text_color=journey_col, bgcolor=color.new(journey_col, 85), text_size=sz, text_halign=text.align_left)
+    table.cell(tbl, 3, r+5, "",              bgcolor=color.new(journey_col, 80), text_size=sz)
 
     // Journey action
     table.cell(tbl, 0, r+6, "ACTION",       text_color=color.white, bgcolor=bg, text_size=sz)
@@ -394,13 +403,18 @@ if barstate.islast
         table.cell(tbl, 2, r+16, str.tostring(td_combined_score) + "/3 TFs", text_color=td_combined_col, bgcolor=bg, text_size=sz)
         table.cell(tbl, 3, r+16, "8-bar look",      text_color=color.gray,       bgcolor=bg, text_size=sz)
 
-        // Narrative row — synthesises all panel data into one plain-English instruction
-        narr     = f_narrative(journey_state, td_combined_score, dir_4, dest_4, runway_4, weekly_mod, scalp_rec, intraday_rec, swing_rec)
-        narr_col = td_combined_score >= 1 and journey_state <= 3 ? color.lime : td_combined_score <= -1 or journey_state == 5 ? color.red : color.yellow
-        table.cell(tbl, 0, r+17, "NARRATIVE", text_color=color.white, bgcolor=bg, text_size=sz)
-        table.cell(tbl, 1, r+17, narr, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
+        // Narrative split into SITUATION (r+17) and TRIGGER (r+18) to stay under string limits
+        narr_col  = td_combined_score >= 1 and journey_state <= 3 ? color.lime : td_combined_score <= -1 or journey_state == 5 ? color.red : color.yellow
+        situation = f_situation(journey_state, td_combined_score, td_state_4h, dir_4, dest_4, runway_4, weekly_mod)
+        trigger   = f_trigger(journey_state, dir_4)
+        table.cell(tbl, 0, r+17, "SITUATION", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+17, situation, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
         table.cell(tbl, 2, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
         table.cell(tbl, 3, r+17, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 0, r+18, "TRIGGER", text_color=color.white, bgcolor=bg, text_size=sz)
+        table.cell(tbl, 1, r+18, trigger, text_color=narr_col, bgcolor=color.new(narr_col, 85), text_size=sz, text_halign=text.align_left)
+        table.cell(tbl, 2, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
+        table.cell(tbl, 3, r+18, "", bgcolor=color.new(narr_col, 85), text_size=sz)
 
 // ── ALERTS (only fire when show_td is enabled) ────────────────────────────────
 // Fires on confirmed bar close when 4H T-D state changes — for signal log.
